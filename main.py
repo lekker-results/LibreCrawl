@@ -1194,6 +1194,189 @@ def crawl_stats():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
+@app.route('/api/keywords', methods=['GET', 'POST'])
+@login_required
+def api_keywords():
+    """Return keyword analysis for the current crawl session or POSTed data"""
+    from src.keyword_extractor import extract_keywords
+    from urllib.parse import urlparse
+
+    try:
+        # POST: client sends local crawl data (e.g. viewing a saved crawl not loaded into session)
+        if request.method == 'POST':
+            body = request.get_json()
+            urls = body.get('urls', [])
+            links = body.get('links', [])
+            limit = body.get('limit', 50)
+            fmt = 'json'
+            min_score = 0
+            domain = urlparse(urls[0]['url']).netloc if urls and urls[0].get('url') else ''
+        else:
+            limit = request.args.get('limit', 50, type=int)
+            fmt = request.args.get('format', 'json')
+            min_score = request.args.get('min_score', 0, type=float)
+
+            crawler = get_or_create_crawler()
+            status_data = crawler.get_status()
+            urls = status_data.get('urls', [])
+            links = status_data.get('links', [])
+            domain = urlparse(crawler.base_url).netloc if crawler.base_url else ''
+
+        if not urls:
+            return jsonify({'domain': '', 'analyzed_at': '', 'pages_analyzed': 0, 'keywords': []})
+        keywords = extract_keywords(urls, links, limit=limit)
+
+        if min_score > 0:
+            keywords = [k for k in keywords if k['score'] >= min_score]
+
+        # Add rank
+        for i, kw in enumerate(keywords):
+            kw['rank'] = i + 1
+
+        if fmt == 'csv':
+            output = StringIO()
+            writer = csv.writer(output)
+            writer.writerow(['Keyword', 'Score', 'Frequency', 'Pages Found On', 'Source Fields', 'Search Volume', 'Competition'])
+            for kw in keywords:
+                writer.writerow([
+                    kw['keyword'], kw['score'], kw['frequency'],
+                    kw['pages'], '; '.join(kw['sources']), '', ''
+                ])
+            csv_content = output.getvalue()
+            from flask import Response
+            filename = f"keywords-{domain}-{datetime.now().strftime('%Y%m%d')}.csv"
+            return Response(
+                csv_content,
+                mimetype='text/csv',
+                headers={'Content-Disposition': f'attachment; filename="{filename}"'}
+            )
+
+        return jsonify({
+            'domain': domain,
+            'analyzed_at': datetime.now().isoformat(),
+            'pages_analyzed': len(urls),
+            'keywords': keywords
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/keywords/<int:crawl_id>')
+@login_required
+def api_keywords_by_crawl(crawl_id):
+    """Return keyword analysis for a specific saved crawl"""
+    from src.keyword_extractor import extract_keywords
+    from src.crawl_db import get_crawl_by_id, load_crawled_urls, load_crawl_links
+    from urllib.parse import urlparse
+
+    try:
+        user_id = session.get('user_id')
+        crawl = get_crawl_by_id(crawl_id)
+        if not crawl:
+            return jsonify({'error': 'Crawl not found'}), 404
+        if user_id and crawl.get('user_id') != user_id:
+            return jsonify({'error': 'Unauthorized'}), 403
+
+        limit = request.args.get('limit', 50, type=int)
+        fmt = request.args.get('format', 'json')
+        min_score = request.args.get('min_score', 0, type=float)
+
+        urls = load_crawled_urls(crawl_id)
+        links = load_crawl_links(crawl_id)
+        domain = crawl.get('base_domain', '')
+        keywords = extract_keywords(urls, links, limit=limit)
+
+        if min_score > 0:
+            keywords = [k for k in keywords if k['score'] >= min_score]
+
+        for i, kw in enumerate(keywords):
+            kw['rank'] = i + 1
+
+        if fmt == 'csv':
+            output = StringIO()
+            writer = csv.writer(output)
+            writer.writerow(['Keyword', 'Score', 'Frequency', 'Pages Found On', 'Source Fields', 'Search Volume', 'Competition'])
+            for kw in keywords:
+                writer.writerow([
+                    kw['keyword'], kw['score'], kw['frequency'],
+                    kw['pages'], '; '.join(kw['sources']), '', ''
+                ])
+            csv_content = output.getvalue()
+            from flask import Response
+            filename = f"keywords-{domain}-{datetime.now().strftime('%Y%m%d')}.csv"
+            return Response(
+                csv_content,
+                mimetype='text/csv',
+                headers={'Content-Disposition': f'attachment; filename="{filename}"'}
+            )
+
+        return jsonify({
+            'domain': domain,
+            'analyzed_at': datetime.now().isoformat(),
+            'pages_analyzed': len(urls),
+            'keywords': keywords
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/keywords/ai')
+@login_required
+def api_keywords_ai():
+    """AI-enhanced keyword analysis"""
+    from src.keyword_extractor import extract_keywords, analyze_keywords_with_ai
+    from urllib.parse import urlparse
+
+    try:
+        provider = request.args.get('provider', os.getenv('AI_PROVIDER', 'openai'))
+        api_key = request.args.get('api_key', os.getenv('AI_API_KEY', ''))
+        model = request.args.get('model', os.getenv('AI_MODEL', ''))
+
+        if not api_key:
+            return jsonify({'error': 'API key required. Pass api_key param or set AI_API_KEY env var.'}), 400
+
+        crawler = get_or_create_crawler()
+        status_data = crawler.get_status()
+        urls = status_data.get('urls', [])
+        links = status_data.get('links', [])
+
+        if not urls:
+            return jsonify({'domain': '', 'analyzed_at': '', 'pages_analyzed': 0, 'keywords': []})
+
+        domain = urlparse(crawler.base_url).netloc if crawler.base_url else ''
+
+        # Get algorithmic keywords first
+        algo_keywords = extract_keywords(urls, links, limit=50)
+
+        # Enhance with AI
+        ai_result = analyze_keywords_with_ai(
+            algo_keywords, urls, provider, api_key, model=model or None
+        )
+
+        if isinstance(ai_result, dict) and 'error' in ai_result:
+            return jsonify(ai_result), 502
+
+        # Add ranks to AI results
+        for i, kw in enumerate(ai_result):
+            kw['rank'] = i + 1
+
+        return jsonify({
+            'domain': domain,
+            'analyzed_at': datetime.now().isoformat(),
+            'pages_analyzed': len(urls),
+            'provider': provider,
+            'keywords': ai_result
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/export_data', methods=['POST'])
 @login_required
 def export_data():
@@ -1434,7 +1617,7 @@ def main():
     from waitress import serve
     print("Starting LibreCrawl on http://localhost:5000")
     print("Using Waitress WSGI server with multi-threading support")
-    serve(app, host='0.0.0.0', port=5000, threads=8)
+    serve(app, host='0.0.0.0', port=int(os.getenv('PORT', '5000')), threads=8)
 
 if __name__ == '__main__':
     main()

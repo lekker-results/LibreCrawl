@@ -46,6 +46,7 @@ class PluginLoader {
         const manualPlugins = [
             // Add your plugin files here, e.g.:
             'e-e-a-t.js',
+            'seo-keywords.js',
             // 'content-quality.js',
         ];
 

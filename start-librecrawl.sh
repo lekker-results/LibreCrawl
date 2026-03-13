@@ -5,6 +5,8 @@
 echo "Checking for Docker..."
 if command -v docker &> /dev/null && command -v docker-compose &> /dev/null; then
     echo "Docker found! Starting LibreCrawl with Docker..."
+    # Pre-create data directory so Docker doesn't create it as root
+    mkdir -p ./data
     docker-compose up -d
 
     # Wait for the service to be ready
