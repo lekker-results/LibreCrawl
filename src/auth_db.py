@@ -93,6 +93,20 @@ def init_db():
             ON verification_tokens(token)
         ''')
 
+        # API keys table for programmatic access
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                key_hash TEXT NOT NULL,
+                name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_used TIMESTAMP,
+                is_active BOOLEAN DEFAULT 1,
+                FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+            )
+        ''')
+
         # Add tier column to existing users table if it doesn't exist
         try:
             cursor.execute("ALTER TABLE users ADD COLUMN tier TEXT DEFAULT 'guest'")
@@ -552,3 +566,88 @@ def get_user_by_email(email):
     except Exception as e:
         print(f"Error fetching user by email: {e}")
         return None
+
+
+# --- API Key Management ---
+
+def create_api_key(user_id, name='default'):
+    """Create a new API key for a user. Returns the plaintext key (shown once)."""
+    try:
+        # Generate a random key with lc_ prefix
+        raw = secrets.token_urlsafe(36)
+        key = f"lc_{raw}"
+        key_hash = bcrypt.hashpw(key.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO api_keys (user_id, key_hash, name)
+                VALUES (?, ?, ?)
+            ''', (user_id, key_hash, name))
+            key_id = cursor.lastrowid
+
+        return key_id, key
+    except Exception as e:
+        print(f"Error creating API key: {e}")
+        return None, None
+
+
+def validate_api_key(key):
+    """Validate an API key. Returns (user_id, tier) or (None, None)."""
+    if not key or not key.startswith('lc_'):
+        return None, None
+
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT ak.id, ak.user_id, ak.key_hash, u.tier
+                FROM api_keys ak
+                JOIN users u ON ak.user_id = u.id
+                WHERE ak.is_active = 1
+            ''')
+            for row in cursor.fetchall():
+                if bcrypt.checkpw(key.encode('utf-8'), row['key_hash'].encode('utf-8')):
+                    # Update last_used
+                    cursor.execute(
+                        'UPDATE api_keys SET last_used = CURRENT_TIMESTAMP WHERE id = ?',
+                        (row['id'],)
+                    )
+                    conn.commit()
+                    return row['user_id'], row['tier'] or 'user'
+        return None, None
+    except Exception as e:
+        print(f"Error validating API key: {e}")
+        return None, None
+
+
+def list_api_keys(user_id):
+    """List API keys for a user (without the actual key)."""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, name, created_at, last_used, is_active
+                FROM api_keys
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+            ''', (user_id,))
+            return [dict(row) for row in cursor.fetchall()]
+    except Exception as e:
+        print(f"Error listing API keys: {e}")
+        return []
+
+
+def revoke_api_key(key_id, user_id):
+    """Revoke an API key (must belong to user)."""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'UPDATE api_keys SET is_active = 0 WHERE id = ? AND user_id = ?',
+                (key_id, user_id)
+            )
+            return cursor.rowcount > 0
+    except Exception as e:
+        print(f"Error revoking API key: {e}")
+        return False

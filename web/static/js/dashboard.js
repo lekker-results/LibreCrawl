@@ -139,6 +139,21 @@ async function loadCrawlFromDashboard(crawlId) {
         updateCrawlButtons();
         updateStatus(`Loaded: ${statusData.urls?.length || 0} URLs`);
 
+        // Update visualization
+        if (typeof window.updateVisualizationFromLoadedData === 'function') {
+            window.updateVisualizationFromLoadedData(statusData.urls || [], statusData.links || []);
+        }
+
+        // Notify plugins of loaded data
+        if (window.LibreCrawlPlugin && window.LibreCrawlPlugin.loader) {
+            window.LibreCrawlPlugin.loader.notifyDataUpdate({
+                urls: crawlState.urls,
+                links: crawlState.links,
+                issues: crawlState.issues,
+                stats: crawlState.stats
+            });
+        }
+
         showNotification('Crawl loaded successfully', 'success');
 
     } catch (error) {

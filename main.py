@@ -16,7 +16,7 @@ from flask_compress import Compress
 from functools import wraps
 from src.crawler import WebCrawler
 from src.settings_manager import SettingsManager
-from src.auth_db import init_db, create_user, authenticate_user, get_user_by_id, log_guest_crawl, get_guest_crawls_last_24h, verify_user, set_user_tier, create_verification_token, verify_token, get_user_by_email
+from src.auth_db import init_db, create_user, authenticate_user, get_user_by_id, log_guest_crawl, get_guest_crawls_last_24h, verify_user, set_user_tier, create_verification_token, verify_token, get_user_by_email, create_api_key, validate_api_key, list_api_keys, revoke_api_key
 from src.email_service import send_verification_email, send_welcome_email
 
 # Load environment variables from .env file
@@ -232,6 +232,8 @@ def start_cleanup_thread():
             time.sleep(300)  # Check every 5 minutes
             try:
                 cleanup_old_instances()
+                # Clean up stale research jobs (older than 30 minutes)
+                _cleanup_research_jobs()
             except Exception as e:
                 print(f"Error in cleanup thread: {e}")
 
@@ -1324,11 +1326,26 @@ def api_keywords_by_crawl(crawl_id):
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/ai/config')
+@login_required
+def api_ai_config():
+    """Return whether a server-side AI key is configured (without exposing it)."""
+    key = os.getenv('AI_API_KEY', '')
+    provider = os.getenv('AI_PROVIDER', '')
+    model = os.getenv('AI_MODEL', '')
+    return jsonify({
+        'has_key': bool(key),
+        'provider': provider if key else '',
+        'model': model if key else '',
+    })
+
+
 @app.route('/api/keywords/ai')
 @login_required
 def api_keywords_ai():
     """AI-enhanced keyword analysis"""
     from src.keyword_extractor import extract_keywords, analyze_keywords_with_ai
+    from src.crawl_db import save_ai_keywords
     from urllib.parse import urlparse
 
     try:
@@ -1353,8 +1370,10 @@ def api_keywords_ai():
         algo_keywords = extract_keywords(urls, links, limit=50)
 
         # Enhance with AI
+        used_model = model or None
         ai_result = analyze_keywords_with_ai(
-            algo_keywords, urls, provider, api_key, model=model or None
+            algo_keywords, urls, provider, api_key, model=used_model,
+            domain=domain, links=links
         )
 
         if isinstance(ai_result, dict) and 'error' in ai_result:
@@ -1363,6 +1382,11 @@ def api_keywords_ai():
         # Add ranks to AI results
         for i, kw in enumerate(ai_result):
             kw['rank'] = i + 1
+
+        # Persist to database if we have a crawl_id
+        crawl_id = getattr(crawler, 'crawl_id', None)
+        if crawl_id:
+            save_ai_keywords(crawl_id, ai_result, provider, used_model or '', scope='site')
 
         return jsonify({
             'domain': domain,
@@ -1375,6 +1399,286 @@ def api_keywords_ai():
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/keywords/ai/page', methods=['POST'])
+@login_required
+def api_keywords_ai_page():
+    """AI keyword analysis for a single page"""
+    from src.keyword_extractor import analyze_page_keywords_with_ai
+    from src.crawl_db import save_ai_keywords
+    from urllib.parse import urlparse
+
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'JSON body required'}), 400
+
+        target_url = data.get('url', '')
+        provider = data.get('provider', os.getenv('AI_PROVIDER', 'openai'))
+        api_key = data.get('api_key', os.getenv('AI_API_KEY', ''))
+        model = data.get('model', os.getenv('AI_MODEL', ''))
+
+        if not api_key:
+            return jsonify({'error': 'API key required'}), 400
+        if not target_url:
+            return jsonify({'error': 'URL required'}), 400
+
+        crawler = get_or_create_crawler()
+        status_data = crawler.get_status()
+        urls = status_data.get('urls', [])
+        all_links = status_data.get('links', [])
+
+        # Find the matching URL data
+        url_data = None
+        for u in urls:
+            if u.get('url') == target_url:
+                url_data = u
+                break
+
+        if not url_data:
+            return jsonify({'error': 'URL not found in crawl data'}), 404
+
+        domain = urlparse(crawler.base_url).netloc if crawler.base_url else ''
+
+        # Collect links pointing to this page
+        page_links = [l for l in all_links if l.get('target_url') == target_url]
+
+        used_model = model or None
+        ai_result = analyze_page_keywords_with_ai(
+            url_data, provider, api_key, model=used_model,
+            domain=domain, links=page_links
+        )
+
+        if isinstance(ai_result, dict) and 'error' in ai_result:
+            return jsonify(ai_result), 502
+
+        for i, kw in enumerate(ai_result):
+            kw['rank'] = i + 1
+
+        # Persist to database
+        crawl_id = getattr(crawler, 'crawl_id', None)
+        if crawl_id:
+            save_ai_keywords(crawl_id, ai_result, provider, used_model or '', scope='page', page_url=target_url)
+
+        return jsonify({
+            'url': target_url,
+            'domain': domain,
+            'analyzed_at': datetime.now().isoformat(),
+            'provider': provider,
+            'keywords': ai_result
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/keywords/ai/stored')
+@login_required
+def api_keywords_ai_stored():
+    """Return stored AI keyword results for the current crawl"""
+    from src.crawl_db import load_ai_keywords
+
+    try:
+        crawler = get_or_create_crawler()
+        crawl_id = getattr(crawler, 'crawl_id', None)
+        if not crawl_id:
+            return jsonify({'keywords': [], 'page_keywords': {}})
+
+        all_kw = load_ai_keywords(crawl_id, scope=None)
+        site_keywords = []
+        page_keywords = {}
+
+        for kw in all_kw:
+            entry = {
+                'keyword': kw['keyword'],
+                'score': kw['score'],
+                'category': kw['category'],
+                'relevance': kw['relevance'],
+                'rank': kw['rank'],
+            }
+            if kw['scope'] == 'site':
+                site_keywords.append(entry)
+            elif kw['scope'] == 'page' and kw.get('page_url'):
+                page_keywords.setdefault(kw['page_url'], []).append(entry)
+
+        return jsonify({
+            'keywords': site_keywords,
+            'page_keywords': page_keywords,
+            'provider': all_kw[0]['provider'] if all_kw else '',
+            'analyzed_at': all_kw[0]['analyzed_at'] if all_kw else '',
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+# --- Google Business Profile (GBP) Endpoints ---
+
+def _get_user_google_places_key():
+    """Get Google Places API key from user's saved settings."""
+    user_id = session.get('user_id')
+    if not user_id:
+        return ''
+    from src.auth_db import get_user_settings
+    settings = get_user_settings(user_id)
+    if settings:
+        return settings.get('google_places_api_key', '')
+    return ''
+
+
+@app.route('/api/gbp', methods=['GET', 'POST'])
+@login_required
+def api_gbp():
+    """GBP data for active crawl session (GET) or from provided data (POST)."""
+    from src.gbp_extractor import build_gbp_report, extract_business_info
+    from src.crawl_db import load_gbp_data, save_gbp_data
+
+    try:
+        # Resolve API key: request param → user settings → env var
+        if request.method == 'POST':
+            body = request.get_json() or {}
+            api_key = body.get('api_key', '')
+        else:
+            body = {}
+            api_key = request.args.get('api_key', '')
+
+        if not api_key:
+            api_key = _get_user_google_places_key()
+        if not api_key:
+            api_key = os.getenv('GOOGLE_PLACES_API_KEY', '')
+
+        # Get crawl data
+        if request.method == 'POST' and body.get('urls'):
+            urls = body['urls']
+            crawl_id = None
+        else:
+            crawler = get_or_create_crawler()
+            status_data = crawler.get_status()
+            urls = status_data.get('urls', [])
+            crawl_id = getattr(crawler, 'crawl_id', None)
+
+        if not urls:
+            return jsonify({'error': 'No crawl data available'}), 404
+
+        # Check cache
+        if crawl_id:
+            cached = load_gbp_data(crawl_id)
+            if cached:
+                return jsonify(cached)
+
+        # Without API key, return only extracted contact info
+        if not api_key:
+            extracted = extract_business_info(urls)
+            result = {
+                'domain': '',
+                'brand_name': extracted.get('brand_name', ''),
+                'branches': [{
+                    'extracted': branch,
+                    'gbp': None,
+                    'match_confidence': 0,
+                    'search_query': '',
+                    'all_candidates': [],
+                } for branch in extracted.get('branches', [])],
+                'analyzed_at': __import__('datetime').datetime.now().isoformat(),
+                'no_api_key': True,
+            }
+            return jsonify(result)
+
+        # Full GBP lookup
+        report = build_gbp_report(urls, api_key)
+
+        # Cache if we have a crawl_id and no errors
+        if crawl_id and not any(b.get('error') for b in report.get('branches', [])):
+            save_gbp_data(crawl_id, report)
+
+        return jsonify(report)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/gbp/<int:crawl_id>')
+@login_required
+def api_gbp_by_crawl(crawl_id):
+    """GBP data for a specific saved crawl."""
+    from src.gbp_extractor import build_gbp_report, extract_business_info
+    from src.crawl_db import load_gbp_data, save_gbp_data, load_crawled_urls
+
+    try:
+        # Check cache first
+        cached = load_gbp_data(crawl_id)
+        if cached:
+            return jsonify(cached)
+
+        # Resolve API key
+        api_key = (
+            request.args.get('api_key') or
+            _get_user_google_places_key() or
+            os.getenv('GOOGLE_PLACES_API_KEY', '')
+        )
+
+        urls = load_crawled_urls(crawl_id)
+        if not urls:
+            return jsonify({'error': 'No crawl data found'}), 404
+
+        # Without API key, return only extracted contact info
+        if not api_key:
+            extracted = extract_business_info(urls)
+            from urllib.parse import urlparse as _urlparse
+            domain = _urlparse(urls[0].get('url', '')).netloc if urls else ''
+            result = {
+                'domain': domain,
+                'brand_name': extracted.get('brand_name', ''),
+                'branches': [{
+                    'extracted': branch,
+                    'gbp': None,
+                    'match_confidence': 0,
+                    'search_query': '',
+                    'all_candidates': [],
+                } for branch in extracted.get('branches', [])],
+                'analyzed_at': __import__('datetime').datetime.now().isoformat(),
+                'no_api_key': True,
+            }
+            return jsonify(result)
+
+        report = build_gbp_report(urls, api_key)
+        if not any(b.get('error') for b in report.get('branches', [])):
+            save_gbp_data(crawl_id, report)
+
+        return jsonify(report)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/gbp/photo')
+@login_required
+def api_gbp_photo():
+    """Proxy for Google Places photo URLs (avoids exposing API key to browser)."""
+    from src.gbp_extractor import get_photo_uri
+
+    photo_name = request.args.get('name', '')
+    if not photo_name:
+        return jsonify({'error': 'Photo name required'}), 400
+
+    api_key = (
+        request.args.get('api_key') or
+        _get_user_google_places_key() or
+        os.getenv('GOOGLE_PLACES_API_KEY', '')
+    )
+    if not api_key:
+        return jsonify({'error': 'No API key'}), 400
+
+    max_width = request.args.get('max_width', 400, type=int)
+    photo_url = get_photo_uri(photo_name, api_key, max_width)
+    return jsonify({'url': photo_url})
 
 
 @app.route('/api/export_data', methods=['POST'])
@@ -1550,6 +1854,684 @@ def recover_crashed_crawls():
             print("=" * 60 + "\n")
     except Exception as e:
         print(f"Error during crash recovery: {e}")
+
+# ============================================================
+# Research API — programmatic crawl + keyword extraction
+# ============================================================
+
+# Registry for research crawl jobs (independent of session-based crawlers)
+research_jobs = {}  # job_id -> {'crawler': WebCrawler, 'created_at': datetime, 'keyword_limit': int}
+research_jobs_lock = threading.Lock()
+
+def _cleanup_research_jobs():
+    """Remove research jobs older than 30 minutes."""
+    cutoff = datetime.now() - timedelta(minutes=30)
+    with research_jobs_lock:
+        to_remove = [jid for jid, job in research_jobs.items() if job['created_at'] < cutoff]
+        for jid in to_remove:
+            try:
+                research_jobs[jid]['crawler'].stop_crawl()
+            except:
+                pass
+            del research_jobs[jid]
+        if to_remove:
+            print(f"Cleaned up {len(to_remove)} stale research jobs")
+
+def _get_local_user_id():
+    """Get the local admin user ID for API requests (creates user if needed)."""
+    import sqlite3
+    try:
+        db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'users.db')
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute('SELECT id FROM users WHERE username = ?', ('local',))
+        user = cursor.fetchone()
+        conn.close()
+        return user['id'] if user else None
+    except Exception:
+        return None
+
+
+def _get_api_user_id():
+    """Resolve user_id for API requests from any auth method."""
+    # From Bearer token auth
+    if hasattr(request, '_api_user_id'):
+        return request._api_user_id
+    # From session
+    if session.get('user_id'):
+        return session['user_id']
+    # In local mode, get the local user
+    if LOCAL_MODE:
+        return _get_local_user_id()
+    return None
+
+
+def api_auth_required(f):
+    """Auth decorator for programmatic API access.
+    In LOCAL_MODE: accepts X-Local-Auth header (no session needed).
+    Otherwise: requires Authorization: Bearer <api_key> header.
+    Falls back to session auth."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # Check X-Local-Auth header in local mode
+        if LOCAL_MODE and request.headers.get('X-Local-Auth', '').lower() == 'true':
+            return f(*args, **kwargs)
+
+        # Check Bearer token
+        auth_header = request.headers.get('Authorization', '')
+        if auth_header.startswith('Bearer '):
+            api_key = auth_header[7:]
+            user_id, tier = validate_api_key(api_key)
+            if user_id:
+                request._api_user_id = user_id
+                request._api_tier = tier
+                return f(*args, **kwargs)
+            return jsonify({'error': 'Invalid API key'}), 401
+
+        # Fall back to session auth
+        if LOCAL_MODE and 'user_id' not in session:
+            auto_login_local_mode()
+        if 'user_id' in session:
+            return f(*args, **kwargs)
+
+        return jsonify({'error': 'Authentication required. Use X-Local-Auth: true (local mode) or Authorization: Bearer <key>'}), 401
+    return decorated_function
+
+
+def _build_research_response(crawler, keyword_limit=50, google_places_api_key=''):
+    """Build AI-optimized response from crawler results."""
+    from src.keyword_extractor import extract_keywords
+
+    status_data = crawler.get_status()
+    urls = status_data.get('urls', [])
+    links = status_data.get('links', [])
+    issues = status_data.get('issues', [])
+    stats = status_data.get('stats', {})
+
+    # Extract keywords
+    keywords = extract_keywords(urls, links, limit=keyword_limit)
+
+    # Find homepage data
+    homepage = None
+    base_url = crawler.base_url or ''
+    for u in urls:
+        url_str = u.get('url', '')
+        if url_str.rstrip('/') == base_url.rstrip('/'):
+            homepage = u
+            break
+    if not homepage and urls:
+        homepage = urls[0]
+
+    # Compute site summary
+    word_counts = [u.get('word_count', 0) for u in urls if u.get('word_count')]
+    avg_word_count = round(sum(word_counts) / max(len(word_counts), 1))
+
+    issues_by_category = {}
+    for issue in issues:
+        cat = issue.get('category', 'Other')
+        issues_by_category[cat] = issues_by_category.get(cat, 0) + 1
+
+    schema_types = set()
+    for u in urls:
+        for st in (u.get('schema_org') or []):
+            if isinstance(st, str):
+                schema_types.add(st)
+            elif isinstance(st, dict):
+                st_type = st.get('@type') or st.get('type') or ''
+                if st_type:
+                    # Extract just the type name from full URI like https://schema.org/Blog
+                    schema_types.add(st_type.rsplit('/', 1)[-1] if '/' in st_type else st_type)
+
+    # Build pages array (flattened SEO fields)
+    pages = []
+    for u in urls:
+        images = u.get('images') or []
+        images_missing_alt = sum(1 for img in images if not img.get('alt'))
+        pages.append({
+            'url': u.get('url'),
+            'status_code': u.get('status_code'),
+            'title': u.get('title'),
+            'meta_description': u.get('meta_description'),
+            'h1': u.get('h1'),
+            'h2': u.get('h2', []),
+            'h3': u.get('h3', []),
+            'word_count': u.get('word_count', 0),
+            'canonical': u.get('canonical_url'),
+            'has_og_tags': bool(u.get('og_tags')),
+            'has_json_ld': bool(u.get('json_ld')),
+            'schema_types': [
+                (s.rsplit('/', 1)[-1] if '/' in s else s) if isinstance(s, str)
+                else ((s.get('@type') or s.get('type') or '').rsplit('/', 1)[-1] if isinstance(s, dict) else str(s))
+                for s in (u.get('schema_org') or [])
+                if (isinstance(s, str)) or (isinstance(s, dict) and (s.get('@type') or s.get('type')))
+            ],
+            'images_count': len(images),
+            'images_missing_alt': images_missing_alt,
+            'internal_links': u.get('internal_links', 0),
+            'external_links': u.get('external_links', 0),
+        })
+
+    # Build link profile
+    total_internal = sum(1 for l in links if l.get('is_internal'))
+    total_external = sum(1 for l in links if not l.get('is_internal'))
+    external_domains = set()
+    for l in links:
+        if not l.get('is_internal'):
+            domain = l.get('target_domain', '')
+            if domain:
+                external_domains.add(domain)
+
+    broken_links = []
+    broken_urls_seen = set()
+    for u in urls:
+        sc = u.get('status_code', 0)
+        if sc and sc >= 400:
+            url_str = u.get('url', '')
+            if url_str not in broken_urls_seen:
+                broken_urls_seen.add(url_str)
+                broken_links.append({
+                    'url': url_str,
+                    'status_code': sc,
+                    'linked_from': u.get('linked_from', [])[:5]
+                })
+
+    # Top anchor texts
+    anchor_counts = {}
+    for l in links:
+        text = (l.get('anchor_text') or '').strip()
+        if text and len(text) > 1:
+            anchor_counts[text] = anchor_counts.get(text, 0) + 1
+    top_anchors = sorted(anchor_counts.items(), key=lambda x: x[1], reverse=True)[:15]
+
+    elapsed = 0
+    if stats.get('start_time'):
+        elapsed = round(time.time() - stats['start_time'], 1)
+
+    response = {
+        'status': 'completed',
+        'meta': {
+            'url': base_url,
+            'domain': crawler.base_domain or '',
+            'pages_crawled': stats.get('crawled', len(urls)),
+            'pages_discovered': stats.get('discovered', 0),
+            'crawl_duration_seconds': elapsed,
+            'analyzed_at': datetime.now().isoformat(),
+        },
+        'site_summary': {
+            'homepage_title': (homepage or {}).get('title', ''),
+            'homepage_meta_description': (homepage or {}).get('meta_description', ''),
+            'homepage_h1': (homepage or {}).get('h1', ''),
+            'avg_word_count': avg_word_count,
+            'total_issues': len(issues),
+            'issues_by_category': issues_by_category,
+            'has_structured_data': bool(schema_types),
+            'has_og_tags': any(u.get('og_tags') for u in urls),
+            'schema_types_found': sorted(schema_types),
+        },
+        'keywords': keywords,
+        'pages': pages,
+        'issues': issues[:100],  # Cap at 100 for response size
+        'link_profile': {
+            'total_internal_links': total_internal,
+            'total_external_links': total_external,
+            'unique_external_domains': sorted(external_domains)[:50],
+            'broken_links': broken_links[:20],
+            'top_anchor_texts': [{'text': t, 'count': c} for t, c in top_anchors],
+        }
+    }
+
+    # Inject GBP data if API key provided
+    if google_places_api_key:
+        try:
+            from src.gbp_extractor import build_gbp_report
+            response['gbp'] = build_gbp_report(urls, google_places_api_key)
+        except Exception as e:
+            response['gbp'] = {'error': str(e)}
+
+    return response
+
+
+def _build_response_from_saved_crawl(crawl, keyword_limit=50, google_places_api_key=''):
+    """Build AI-optimized response from a previously saved crawl in the database."""
+    from src.keyword_extractor import extract_keywords
+    from src.crawl_db import load_crawled_urls, load_crawl_links, load_crawl_issues
+
+    crawl_id = crawl['id']
+    urls = load_crawled_urls(crawl_id)
+    links = load_crawl_links(crawl_id)
+    issues = load_crawl_issues(crawl_id)
+
+    # Extract keywords from saved data
+    keywords = extract_keywords(urls, links, limit=keyword_limit)
+
+    # Find homepage
+    base_url = crawl.get('base_url', '')
+    homepage = None
+    for u in urls:
+        if u.get('url', '').rstrip('/') == base_url.rstrip('/'):
+            homepage = u
+            break
+    if not homepage and urls:
+        homepage = urls[0]
+
+    # Compute summary
+    word_counts = [u.get('word_count', 0) for u in urls if u.get('word_count')]
+    avg_word_count = round(sum(word_counts) / max(len(word_counts), 1))
+
+    issues_by_category = {}
+    for issue in issues:
+        cat = issue.get('category', 'Other')
+        issues_by_category[cat] = issues_by_category.get(cat, 0) + 1
+
+    schema_types = set()
+    for u in urls:
+        for st in (u.get('schema_org') or []):
+            if isinstance(st, str):
+                schema_types.add(st)
+            elif isinstance(st, dict):
+                st_type = st.get('@type') or st.get('type') or ''
+                if st_type:
+                    # Extract just the type name from full URI like https://schema.org/Blog
+                    schema_types.add(st_type.rsplit('/', 1)[-1] if '/' in st_type else st_type)
+
+    pages = []
+    for u in urls:
+        images = u.get('images') or []
+        images_missing_alt = sum(1 for img in images if not img.get('alt'))
+        pages.append({
+            'url': u.get('url'),
+            'status_code': u.get('status_code'),
+            'title': u.get('title'),
+            'meta_description': u.get('meta_description'),
+            'h1': u.get('h1'),
+            'h2': u.get('h2', []),
+            'h3': u.get('h3', []),
+            'word_count': u.get('word_count', 0),
+            'canonical': u.get('canonical_url'),
+            'has_og_tags': bool(u.get('og_tags')),
+            'has_json_ld': bool(u.get('json_ld')),
+            'schema_types': [
+                (s.rsplit('/', 1)[-1] if '/' in s else s) if isinstance(s, str)
+                else ((s.get('@type') or s.get('type') or '').rsplit('/', 1)[-1] if isinstance(s, dict) else str(s))
+                for s in (u.get('schema_org') or [])
+                if (isinstance(s, str)) or (isinstance(s, dict) and (s.get('@type') or s.get('type')))
+            ],
+            'images_count': len(images),
+            'images_missing_alt': images_missing_alt,
+            'internal_links': u.get('internal_links', 0),
+            'external_links': u.get('external_links', 0),
+        })
+
+    total_internal = sum(1 for l in links if l.get('is_internal'))
+    total_external = sum(1 for l in links if not l.get('is_internal'))
+    external_domains = set()
+    for l in links:
+        if not l.get('is_internal'):
+            domain = l.get('target_domain', '')
+            if domain:
+                external_domains.add(domain)
+
+    broken_links = []
+    for u in urls:
+        sc = u.get('status_code', 0)
+        if sc and sc >= 400:
+            broken_links.append({
+                'url': u.get('url', ''),
+                'status_code': sc,
+                'linked_from': u.get('linked_from', [])[:5]
+            })
+
+    anchor_counts = {}
+    for l in links:
+        text = (l.get('anchor_text') or '').strip()
+        if text and len(text) > 1:
+            anchor_counts[text] = anchor_counts.get(text, 0) + 1
+    top_anchors = sorted(anchor_counts.items(), key=lambda x: x[1], reverse=True)[:15]
+
+    response = {
+        'status': 'completed',
+        'cached': True,
+        'meta': {
+            'url': base_url,
+            'domain': crawl.get('base_domain', ''),
+            'pages_crawled': crawl.get('urls_crawled', len(urls)),
+            'pages_discovered': crawl.get('urls_discovered', 0),
+            'crawl_id': crawl_id,
+            'crawled_at': crawl.get('completed_at', ''),
+            'analyzed_at': datetime.now().isoformat(),
+        },
+        'site_summary': {
+            'homepage_title': (homepage or {}).get('title', ''),
+            'homepage_meta_description': (homepage or {}).get('meta_description', ''),
+            'homepage_h1': (homepage or {}).get('h1', ''),
+            'avg_word_count': avg_word_count,
+            'total_issues': len(issues),
+            'issues_by_category': issues_by_category,
+            'has_structured_data': bool(schema_types),
+            'has_og_tags': any(u.get('og_tags') for u in urls),
+            'schema_types_found': sorted(schema_types),
+        },
+        'keywords': keywords,
+        'pages': pages,
+        'issues': issues[:100],
+        'link_profile': {
+            'total_internal_links': total_internal,
+            'total_external_links': total_external,
+            'unique_external_domains': sorted(external_domains)[:50],
+            'broken_links': broken_links[:20],
+            'top_anchor_texts': [{'text': t, 'count': c} for t, c in top_anchors],
+        }
+    }
+
+    # Inject GBP data if API key provided
+    if google_places_api_key:
+        try:
+            from src.gbp_extractor import build_gbp_report
+            response['gbp'] = build_gbp_report(urls, google_places_api_key)
+        except Exception as e:
+            response['gbp'] = {'error': str(e)}
+
+    return response
+
+
+@app.route('/api/research', methods=['POST'])
+@api_auth_required
+def api_research():
+    """Programmatic endpoint: crawl a URL and return structured SEO + keyword data.
+    If a recent crawl exists for the same domain, returns cached results."""
+    data = request.get_json()
+    if not data or not data.get('url'):
+        return jsonify({'error': 'url is required'}), 400
+
+    url = data['url']
+    max_urls = data.get('max_urls', 500)
+    max_depth = data.get('max_depth', 3)
+    keyword_limit = data.get('keyword_limit', 50)
+    timeout = min(data.get('timeout', 180), 600)  # Cap at 10 minutes
+    force_recrawl = data.get('force_recrawl', False)
+    cache_max_age_hours = data.get('cache_max_age_hours', 24)
+    google_places_api_key = data.get('google_places_api_key') or os.getenv('GOOGLE_PLACES_API_KEY', '')
+
+    # Normalize URL
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+
+    # Check for existing recent crawl (unless force_recrawl)
+    if not force_recrawl:
+        from urllib.parse import urlparse as _urlparse
+        from src.crawl_db import find_recent_crawl_by_domain
+        parsed = _urlparse(url)
+        domain = parsed.netloc
+        existing, total_count = find_recent_crawl_by_domain(domain, max_age_hours=cache_max_age_hours)
+        if existing:
+            print(f"Research API: returning cached crawl {existing['id']} for {domain} ({total_count} total crawls)")
+            result = _build_response_from_saved_crawl(existing, keyword_limit, google_places_api_key=google_places_api_key)
+            result['meta']['total_crawls_for_domain'] = total_count
+            if total_count > 1:
+                result['meta']['note'] = f'{total_count} crawls exist for this domain. Returning the most recent one. Use force_recrawl=true to trigger a fresh crawl.'
+            return jsonify(result)
+
+    # Create a standalone crawler with research-optimized config
+    crawler = WebCrawler()
+    crawler.update_config({
+        'max_depth': max_depth,
+        'max_urls': max_urls,
+        'delay': 0.5,
+        'concurrency': 3,
+        'timeout': 8,
+        'discover_sitemaps': True,
+        'enable_pagespeed': False,
+        'enable_javascript': False,
+        'respect_robots': True,
+    })
+
+    # Start crawl with user binding for crawl history visibility
+    synthetic_session = f"research_{uuid.uuid4().hex[:12]}"
+    user_id = _get_api_user_id()
+    success, message = crawler.start_crawl(url, user_id=user_id, session_id=synthetic_session)
+    if not success:
+        return jsonify({'error': message}), 400
+
+    job_id = f"r_{uuid.uuid4().hex[:12]}"
+
+    # Poll until completion or timeout
+    start = time.time()
+    while crawler.is_running and (time.time() - start) < timeout:
+        time.sleep(1)
+
+    if crawler.is_running:
+        # Crawl still running — store for later retrieval
+        with research_jobs_lock:
+            research_jobs[job_id] = {
+                'crawler': crawler,
+                'created_at': datetime.now(),
+                'keyword_limit': keyword_limit,
+                'google_places_api_key': google_places_api_key,
+            }
+        status_data = crawler.get_status()
+        return jsonify({
+            'status': 'running',
+            'job_id': job_id,
+            'progress': round(status_data.get('progress', 0)),
+            'pages_crawled': status_data.get('stats', {}).get('crawled', 0),
+            'message': f'Crawl still in progress. Poll GET /api/research/{job_id} for results.',
+        }), 202
+
+    # Crawl completed — return results immediately
+    return jsonify(_build_research_response(crawler, keyword_limit, google_places_api_key=google_places_api_key))
+
+
+@app.route('/api/research/<job_id>')
+@api_auth_required
+def api_research_poll(job_id):
+    """Poll for results of a research crawl that exceeded the initial timeout."""
+    with research_jobs_lock:
+        job = research_jobs.get(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+
+    crawler = job['crawler']
+    if crawler.is_running:
+        status_data = crawler.get_status()
+        return jsonify({
+            'status': 'running',
+            'job_id': job_id,
+            'progress': round(status_data.get('progress', 0)),
+            'pages_crawled': status_data.get('stats', {}).get('crawled', 0),
+            'message': 'Crawl still in progress.',
+        }), 202
+
+    # Completed — build response and clean up
+    result = _build_research_response(crawler, job.get('keyword_limit', 50), google_places_api_key=job.get('google_places_api_key', ''))
+    with research_jobs_lock:
+        research_jobs.pop(job_id, None)
+    return jsonify(result)
+
+
+def _build_images_response(urls, domain=''):
+    """Build image-focused response from crawl URL data."""
+    pages = []
+    total_images = 0
+    total_missing_alt = 0
+    total_long_alt = 0
+    all_images_flat = []
+
+    for u in urls:
+        images = u.get('images') or []
+        if not images:
+            continue
+
+        page_images = []
+        for img in images:
+            src = img.get('src', '')
+            alt = img.get('alt', '')
+            img_entry = {
+                'src': src,
+                'alt': alt,
+                'width': img.get('width', ''),
+                'height': img.get('height', ''),
+                'missing_alt': not alt,
+                'long_alt': len(alt) > 80 if alt else False,
+                'context': img.get('context'),
+            }
+            page_images.append(img_entry)
+            all_images_flat.append({**img_entry, 'page_url': u.get('url', '')})
+            total_images += 1
+            if not alt:
+                total_missing_alt += 1
+            elif len(alt) > 80:
+                total_long_alt += 1
+
+        pages.append({
+            'url': u.get('url', ''),
+            'title': u.get('title', ''),
+            'images_count': len(page_images),
+            'images_missing_alt': sum(1 for i in page_images if i['missing_alt']),
+            'images': page_images,
+        })
+
+    # Find duplicate images (same src across multiple pages)
+    src_pages = {}
+    for img in all_images_flat:
+        src = img['src']
+        if src:
+            if src not in src_pages:
+                src_pages[src] = set()
+            src_pages[src].add(img['page_url'])
+    duplicate_images = [
+        {'src': src, 'found_on_pages': len(page_set), 'pages': sorted(page_set)[:5]}
+        for src, page_set in src_pages.items() if len(page_set) > 1
+    ]
+    duplicate_images.sort(key=lambda x: x['found_on_pages'], reverse=True)
+
+    return {
+        'status': 'completed',
+        'meta': {
+            'domain': domain,
+            'pages_with_images': len(pages),
+            'analyzed_at': datetime.now().isoformat(),
+        },
+        'summary': {
+            'total_images': total_images,
+            'missing_alt': total_missing_alt,
+            'long_alt': total_long_alt,
+            'has_alt': total_images - total_missing_alt,
+            'duplicate_images': len(duplicate_images),
+            'alt_coverage_percent': round((total_images - total_missing_alt) / max(total_images, 1) * 100, 1),
+        },
+        'pages': pages,
+        'duplicate_images': duplicate_images[:50],
+    }
+
+
+@app.route('/api/research/images', methods=['POST'])
+@api_auth_required
+def api_research_images():
+    """Return per-page image data (src, alt, width, height) for a domain.
+    Uses cached crawl data if available, otherwise triggers a new crawl."""
+    data = request.get_json()
+    if not data or not data.get('url'):
+        return jsonify({'error': 'url is required'}), 400
+
+    url = data['url']
+    force_recrawl = data.get('force_recrawl', False)
+    cache_max_age_hours = data.get('cache_max_age_hours', 24)
+    timeout = min(data.get('timeout', 180), 600)
+
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+
+    from urllib.parse import urlparse as _urlparse
+    parsed = _urlparse(url)
+    domain = parsed.netloc.replace('www.', '', 1) if parsed.netloc.startswith('www.') else parsed.netloc
+
+    # Check for cached crawl
+    if not force_recrawl:
+        from src.crawl_db import find_recent_crawl_by_domain, load_crawled_urls
+        existing, total_count = find_recent_crawl_by_domain(domain, max_age_hours=cache_max_age_hours)
+        if existing:
+            urls_data = load_crawled_urls(existing['id'])
+            result = _build_images_response(urls_data, domain)
+            result['cached'] = True
+            result['meta']['crawl_id'] = existing['id']
+            result['meta']['crawled_at'] = existing.get('completed_at', '')
+            return jsonify(result)
+
+    # No cache — trigger a crawl
+    max_urls = data.get('max_urls', 500)
+    max_depth = data.get('max_depth', 3)
+
+    crawler = WebCrawler()
+    crawler.update_config({
+        'max_depth': max_depth,
+        'max_urls': max_urls,
+        'delay': 0.5,
+        'concurrency': 3,
+        'timeout': 8,
+        'discover_sitemaps': True,
+        'enable_pagespeed': False,
+        'enable_javascript': False,
+        'respect_robots': True,
+    })
+
+    synthetic_session = f"research_{uuid.uuid4().hex[:12]}"
+    user_id = _get_api_user_id()
+    success, message = crawler.start_crawl(url, user_id=user_id, session_id=synthetic_session)
+    if not success:
+        return jsonify({'error': message}), 400
+
+    # Poll until completion or timeout
+    start = time.time()
+    while crawler.is_running and (time.time() - start) < timeout:
+        time.sleep(1)
+
+    if crawler.is_running:
+        crawler.stop_crawl()
+        return jsonify({'error': 'Crawl timed out. Try again or increase timeout.'}), 504
+
+    status_data = crawler.get_status()
+    result = _build_images_response(status_data.get('urls', []), domain)
+    result['cached'] = False
+    result['meta']['crawl_duration_seconds'] = round(time.time() - start, 1)
+    return jsonify(result)
+
+
+# --- API Key Management Endpoints ---
+
+@app.route('/api/keys', methods=['GET', 'POST'])
+@login_required
+def api_keys_endpoint():
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({'error': 'Authentication required'}), 401
+
+    if request.method == 'POST':
+        data = request.get_json() or {}
+        name = data.get('name', 'default')
+        key_id, key = create_api_key(user_id, name)
+        if key:
+            return jsonify({'id': key_id, 'key': key, 'name': name})
+        return jsonify({'error': 'Failed to create API key'}), 500
+
+    # GET — list keys
+    keys = list_api_keys(user_id)
+    return jsonify({'keys': keys})
+
+
+@app.route('/api/keys/<int:key_id>', methods=['DELETE'])
+@login_required
+def api_keys_delete(key_id):
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({'error': 'Authentication required'}), 401
+    if revoke_api_key(key_id, user_id):
+        return jsonify({'success': True})
+    return jsonify({'error': 'Key not found or already revoked'}), 404
+
+
+# ============================================================
+
 
 def graceful_shutdown(signum, frame):
     """Save all active crawls before shutdown"""

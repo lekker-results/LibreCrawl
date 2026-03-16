@@ -18,6 +18,7 @@ let defaultSettings = {
     discoverSitemaps: true,
     enablePageSpeed: false,
     googleApiKey: '',
+    google_places_api_key: '',
 
     // Filter settings
     includeExtensions: 'html,htm,php,asp,aspx,jsp',
@@ -458,7 +459,7 @@ function collectSettingsFromForm() {
     // Collect regular form fields
     const formFields = [
         'maxDepth', 'maxUrls', 'crawlDelay', 'followRedirects', 'crawlExternalLinks',
-        'userAgent', 'timeout', 'retries', 'acceptLanguage', 'respectRobotsTxt', 'allowCookies', 'discoverSitemaps', 'enablePageSpeed', 'googleApiKey',
+        'userAgent', 'timeout', 'retries', 'acceptLanguage', 'respectRobotsTxt', 'allowCookies', 'discoverSitemaps', 'enablePageSpeed', 'googleApiKey', 'google_places_api_key',
         'includeExtensions', 'excludeExtensions', 'includePatterns', 'excludePatterns', 'maxFileSize',
         'enableDuplicationCheck', 'duplicationThreshold',
         'exportFormat', 'concurrency', 'memoryLimit', 'logLevel', 'saveSession',

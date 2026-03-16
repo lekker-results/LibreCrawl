@@ -47,6 +47,8 @@ class PluginLoader {
             // Add your plugin files here, e.g.:
             'e-e-a-t.js',
             'seo-keywords.js',
+            'seo-images.js',
+            'gbp-profile.js',
             // 'content-quality.js',
         ];
 

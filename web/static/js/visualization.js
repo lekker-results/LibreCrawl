@@ -5,13 +5,19 @@
 
 let cy = null;  // Cytoscape instance
 let graphData = { nodes: [], edges: [] };  // Current graph data
-let currentLayout = 'cose';  // Current layout algorithm
-let currentFilter = 'all';  // Current filter
+let currentLayout = localStorage.getItem('viz_layout') || 'cose';
+let currentFilter = localStorage.getItem('viz_filter') || 'all';
 
 /**
  * Initialize the visualization when tab is opened
  */
 function initVisualization() {
+    // Restore saved dropdown selections
+    const layoutSelect = document.getElementById('vizLayout');
+    const filterSelect = document.getElementById('vizFilter');
+    if (layoutSelect && currentLayout) layoutSelect.value = currentLayout;
+    if (filterSelect && currentFilter) filterSelect.value = currentFilter;
+
     if (cy) {
         return; // Already initialized
     }
@@ -331,6 +337,7 @@ function applyLayout(layoutName) {
  */
 function changeLayout(layoutName) {
     currentLayout = layoutName;
+    localStorage.setItem('viz_layout', layoutName);
     applyLayout(layoutName);
 }
 
@@ -339,6 +346,7 @@ function changeLayout(layoutName) {
  */
 function filterVisualization(filter) {
     currentFilter = filter;
+    localStorage.setItem('viz_filter', filter);
     updateGraph();
 }
 

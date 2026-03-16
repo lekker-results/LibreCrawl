@@ -156,6 +156,101 @@ class SEOExtractor:
             result['analytics']['mixpanel'] = True
 
     @staticmethod
+    def _find_semantic_container(element):
+        """Walk up the DOM to find the nearest container that holds both
+        the image and associated text content.
+
+        Stops at body/main/article or after 6 levels to avoid grabbing
+        the entire page.
+        """
+        STOP_TAGS = {'body', 'main', 'article', '[document]', 'html'}
+        COLUMN_HINTS = {'column', 'col', 'cell', 'grid', 'flex', 'row',
+                        'wp-block-column', 'wp-block-columns'}
+        MAX_LEVELS = 6
+
+        current = element
+        for _ in range(MAX_LEVELS):
+            parent = current.parent if current else None
+            if not parent or parent.name in STOP_TAGS:
+                break
+
+            # Check if this parent has text content (headings or paragraphs)
+            has_text = bool(
+                parent.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']) or
+                parent.find('p', string=lambda s: s and len(s.strip()) > 10)
+            )
+
+            if has_text:
+                # Check it's not too large (rough heuristic: < 8 direct children
+                # or has column/grid layout indicators)
+                parent_classes = ' '.join(parent.get('class', []))
+                is_layout = any(hint in parent_classes.lower() for hint in COLUMN_HINTS)
+                direct_children = [c for c in parent.children if hasattr(c, 'name') and c.name]
+
+                if is_layout or len(direct_children) <= 8:
+                    return parent
+
+            current = parent
+
+        return None
+
+    @staticmethod
+    def _extract_image_context(img):
+        """Extract surrounding text context for an image element."""
+        context = {
+            'nearest_heading': None,
+            'figcaption': None,
+            'surrounding_text': ''
+        }
+
+        # 1. Figcaption (most semantically meaningful)
+        figure = img.find_parent('figure')
+        if figure:
+            caption = figure.find('figcaption')
+            if caption:
+                context['figcaption'] = caption.get_text(strip=True)
+
+        # 2. Find semantic container and extract text from it
+        texts = []
+        heading_text = None
+
+        # Start from figure if present, otherwise from img's parent
+        start_el = figure if figure else img.parent
+        container = SEOExtractor._find_semantic_container(start_el)
+
+        if container:
+            # Extract headings from the container
+            headings = container.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+            if headings:
+                heading_text = headings[0].get_text(strip=True)
+
+            # Extract paragraph text from the container
+            for p in container.find_all('p'):
+                p_text = p.get_text(strip=True)
+                if p_text and len(p_text) > 10:
+                    texts.append(p_text)
+
+        # 3. Fallback: nearest heading via document order if container didn't yield one
+        if not heading_text:
+            h = img.find_previous(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+            if h:
+                heading_text = h.get_text(strip=True)
+
+        # 4. Fallback: if container yielded no text, try direct siblings
+        if not texts:
+            parent = img.parent
+            prev_p = img.find_previous_sibling('p') or (parent and parent.find_previous_sibling('p'))
+            if prev_p:
+                texts.append(prev_p.get_text(strip=True))
+            next_p = img.find_next_sibling('p') or (parent and parent.find_next_sibling('p'))
+            if next_p:
+                texts.append(next_p.get_text(strip=True))
+
+        context['nearest_heading'] = heading_text
+        context['surrounding_text'] = ' '.join(texts) if texts else ''
+        return context
+
+    @staticmethod
     def extract_images(soup, base_url, result):
         """Extract image information"""
         images = soup.find_all('img')
@@ -178,7 +273,8 @@ class SEOExtractor:
                     'src': src,
                     'alt': alt,
                     'width': img.get('width', ''),
-                    'height': img.get('height', '')
+                    'height': img.get('height', ''),
+                    'context': SEOExtractor._extract_image_context(img)
                 })
 
     @staticmethod

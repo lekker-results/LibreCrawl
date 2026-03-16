@@ -25,6 +25,8 @@ services:
       # - SMTP_FROM_NAME=${SMTP_FROM_NAME}
       # Add this for correct links in the verification emails
       # - MAIN_APP_URL=${MAIN_APP_URL}
+      # Google Places API key (optional) - enables GBP plugin
+      # - GOOGLE_PLACES_API_KEY=${GOOGLE_PLACES_API_KEY}
     restart: unless-stopped
     command: >
       sh -c "

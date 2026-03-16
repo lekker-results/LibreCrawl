@@ -111,6 +111,28 @@ def init_crawl_tables():
             )
         ''')
 
+        # Add unique constraint on (crawl_id, url) to prevent duplicate URLs per crawl
+        try:
+            cursor.execute('''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_crawled_urls_unique
+                ON crawled_urls(crawl_id, url)
+            ''')
+        except Exception:
+            # Existing data has duplicates — clean them up first, keep the most recent
+            print("Cleaning up duplicate URLs in crawled_urls...")
+            cursor.execute('''
+                DELETE FROM crawled_urls WHERE id NOT IN (
+                    SELECT MAX(id) FROM crawled_urls GROUP BY crawl_id, url
+                )
+            ''')
+            deleted = cursor.rowcount
+            print(f"Removed {deleted} duplicate URL entries")
+            conn.commit()
+            cursor.execute('''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_crawled_urls_unique
+                ON crawled_urls(crawl_id, url)
+            ''')
+
         # Links table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS crawl_links (
@@ -167,6 +189,28 @@ def init_crawl_tables():
             )
         ''')
 
+        # AI keyword analysis results
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS crawl_ai_keywords (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                crawl_id INTEGER NOT NULL,
+                scope TEXT NOT NULL DEFAULT 'site',
+                page_url TEXT,
+
+                keyword TEXT NOT NULL,
+                score REAL,
+                category TEXT,
+                relevance TEXT,
+                rank INTEGER,
+
+                provider TEXT,
+                model TEXT,
+                analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+                FOREIGN KEY (crawl_id) REFERENCES crawls(id) ON DELETE CASCADE
+            )
+        ''')
+
         # Create indexes for performance
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_crawls_user_status ON crawls(user_id, status)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_crawls_session ON crawls(session_id)')
@@ -180,6 +224,19 @@ def init_crawl_tables():
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_crawl_issues_url ON crawl_issues(crawl_id, url)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_crawl_issues_category ON crawl_issues(crawl_id, category)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_crawl_queue_crawl ON crawl_queue(crawl_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_crawl_ai_keywords_crawl ON crawl_ai_keywords(crawl_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_crawl_ai_keywords_scope ON crawl_ai_keywords(crawl_id, scope)')
+
+        # GBP (Google Business Profile) cache table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS crawl_gbp_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                crawl_id INTEGER NOT NULL UNIQUE,
+                data_json TEXT NOT NULL,
+                fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (crawl_id) REFERENCES crawls(id) ON DELETE CASCADE
+            )
+        ''')
 
         print("Crawl persistence tables initialized successfully")
 
@@ -291,7 +348,7 @@ def save_url_batch(crawl_id, urls):
                 rows.append(row)
 
             cursor.executemany('''
-                INSERT INTO crawled_urls (
+                INSERT OR REPLACE INTO crawled_urls (
                     crawl_id, url, status_code, content_type, size, is_internal, depth,
                     title, meta_description, h1, h2, h3, word_count,
                     canonical_url, lang, charset, viewport, robots,
@@ -624,6 +681,42 @@ def cleanup_old_crawls(days=90):
         print(f"Error cleaning up old crawls: {e}")
         return 0
 
+def find_recent_crawl_by_domain(base_domain, max_age_hours=24):
+    """Find the most recent completed crawl for a domain within max_age_hours.
+    Returns (crawl_dict, total_crawl_count) or (None, 0)."""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+
+            # Count all completed crawls for this domain
+            cursor.execute('''
+                SELECT COUNT(*) as count FROM crawls
+                WHERE base_domain = ? AND status = 'completed'
+            ''', (base_domain,))
+            total_count = cursor.fetchone()['count']
+
+            # Get most recent within age limit
+            cursor.execute('''
+                SELECT * FROM crawls
+                WHERE base_domain = ?
+                  AND status = 'completed'
+                  AND completed_at >= datetime('now', ? || ' hours')
+                ORDER BY completed_at DESC
+                LIMIT 1
+            ''', (base_domain, f'-{max_age_hours}'))
+
+            row = cursor.fetchone()
+            if row:
+                crawl = dict(row)
+                if crawl.get('config_snapshot'):
+                    crawl['config_snapshot'] = json.loads(crawl['config_snapshot'])
+                return crawl, total_count
+            return None, total_count
+    except Exception as e:
+        print(f"Error finding crawl by domain: {e}")
+        return None, 0
+
+
 def get_crawl_count(user_id):
     """Get total number of crawls for a user"""
     try:
@@ -635,6 +728,117 @@ def get_crawl_count(user_id):
     except Exception as e:
         print(f"Error getting crawl count: {e}")
         return 0
+
+def save_ai_keywords(crawl_id, keywords, provider, model, scope='site', page_url=None):
+    """Save AI-analyzed keywords for a crawl (site-wide or per-page)"""
+    if not keywords:
+        return True
+
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+
+            # Clear previous results for this scope/page
+            if scope == 'page' and page_url:
+                cursor.execute(
+                    'DELETE FROM crawl_ai_keywords WHERE crawl_id = ? AND scope = ? AND page_url = ?',
+                    (crawl_id, scope, page_url)
+                )
+            elif scope == 'site':
+                cursor.execute(
+                    'DELETE FROM crawl_ai_keywords WHERE crawl_id = ? AND scope = ?',
+                    (crawl_id, scope)
+                )
+
+            rows = []
+            for kw in keywords:
+                rows.append((
+                    crawl_id, scope, page_url,
+                    kw.get('keyword', ''),
+                    kw.get('score', 0),
+                    kw.get('category', ''),
+                    kw.get('relevance', ''),
+                    kw.get('rank', 0),
+                    provider, model
+                ))
+
+            cursor.executemany('''
+                INSERT INTO crawl_ai_keywords (
+                    crawl_id, scope, page_url, keyword, score, category, relevance, rank, provider, model
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', rows)
+
+            print(f"Saved {len(keywords)} AI keywords for crawl {crawl_id} (scope={scope})")
+            return True
+    except Exception as e:
+        print(f"Error saving AI keywords: {e}")
+        return False
+
+
+def load_ai_keywords(crawl_id, scope='site', page_url=None):
+    """Load AI-analyzed keywords for a crawl"""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+
+            if scope == 'page' and page_url:
+                cursor.execute(
+                    'SELECT * FROM crawl_ai_keywords WHERE crawl_id = ? AND scope = ? AND page_url = ? ORDER BY rank',
+                    (crawl_id, scope, page_url)
+                )
+            elif scope == 'site':
+                cursor.execute(
+                    'SELECT * FROM crawl_ai_keywords WHERE crawl_id = ? AND scope = ? ORDER BY rank',
+                    (crawl_id, scope)
+                )
+            else:
+                cursor.execute(
+                    'SELECT * FROM crawl_ai_keywords WHERE crawl_id = ? ORDER BY scope, rank',
+                    (crawl_id,)
+                )
+
+            return [dict(row) for row in cursor.fetchall()]
+    except Exception as e:
+        print(f"Error loading AI keywords: {e}")
+        return []
+
+
+def save_gbp_data(crawl_id, report):
+    """Cache GBP report data for a crawl."""
+    try:
+        data_json = json.dumps(report)
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO crawl_gbp_data (crawl_id, data_json, fetched_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(crawl_id) DO UPDATE SET
+                    data_json = excluded.data_json,
+                    fetched_at = CURRENT_TIMESTAMP
+            ''', (crawl_id, data_json))
+        return True
+    except Exception as e:
+        print(f"Error saving GBP data: {e}")
+        return False
+
+
+def load_gbp_data(crawl_id):
+    """Load cached GBP report for a crawl. Returns dict or None."""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'SELECT data_json FROM crawl_gbp_data WHERE crawl_id = ?',
+                (crawl_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return json.loads(row['data_json'])
+        return None
+    except Exception as e:
+        print(f"Error loading GBP data: {e}")
+        return None
+
 
 def get_database_size_mb():
     """Get total database size in MB"""

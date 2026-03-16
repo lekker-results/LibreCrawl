@@ -1,5 +1,7 @@
 
 *.pyc
 .claude/settings.local.json
+.env
+.venv/
 users.db
 data/*.db

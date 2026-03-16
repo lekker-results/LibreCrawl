@@ -1003,7 +1003,10 @@ function switchTab(tabName) {
     document.querySelectorAll('.tab-pane').forEach(pane => pane.classList.remove('active'));
 
     // Add active class to selected tab and pane
-    event.target.classList.add('active');
+    // Find the tab button by data attribute or onclick match (supports programmatic calls)
+    const targetBtn = document.querySelector(`.tab-btn[data-plugin-id="${tabName}"]`) ||
+                      (typeof event !== 'undefined' && event && event.target);
+    if (targetBtn) targetBtn.classList.add('active');
     document.getElementById(tabName + '-tab').classList.add('active');
 
     // Load pending links data if switching to Links tab
@@ -1120,6 +1123,18 @@ function toggleFilter(filterType) {
 
     event.currentTarget.classList.add('active');
     crawlState.filters.active = filterType;
+
+    // Redirect images filter to the images plugin tab
+    if (filterType === 'images') {
+        switchTab('seo-images');
+        return;
+    }
+
+    // If currently on a plugin tab, switch back to overview before applying filter
+    const activePluginPane = document.querySelector('.tab-pane.plugin-tab.active');
+    if (activePluginPane) {
+        switchTab('overview');
+    }
 
     // Apply filter to tables
     applyFilter(filterType);
@@ -1270,7 +1285,12 @@ function updateFilterCounts() {
         if (contentType.includes('html')) counts.html++;
         else if (contentType.includes('css')) counts.css++;
         else if (contentType.includes('javascript')) counts.js++;
-        else if (contentType.includes('image')) counts.images++;
+
+        // Count discovered images from page image arrays (not content_type), excluding SVGs
+        (url.images || []).forEach(img => {
+            const src = img.src || '';
+            if (src && !/\.svg(\?|#|$)/i.test(src) && !/svg\+xml/i.test(src)) counts.images++;
+        });
     });
 
     // Update DOM

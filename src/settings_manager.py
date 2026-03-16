@@ -30,7 +30,9 @@ class SettingsManager:
             # Export tab
             'exportFormat', 'exportFields',
             # Issues tab
-            'issueExclusionPatterns'
+            'issueExclusionPatterns',
+            # Plugin API keys
+            'google_places_api_key',
         ]
 
         # extra: all in user + Filters, Requests, Custom CSS, JavaScript tabs
@@ -127,6 +129,9 @@ class SettingsManager:
 
             # Custom CSS styling
             'customCSS': '',
+
+            # Plugin API keys
+            'google_places_api_key': '',
 
             # Issue exclusion patterns
             'issueExclusionPatterns': '''# WordPress admin & system paths

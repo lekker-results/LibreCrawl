@@ -212,8 +212,12 @@ class WebCrawler:
                 url = 'https://' + url
 
             parsed = urlparse(url)
-            self.base_url = f"{parsed.scheme}://{parsed.netloc}"
-            self.base_domain = parsed.netloc
+            # Normalize: strip www. from domain for consistent matching
+            netloc = parsed.netloc
+            if netloc.startswith('www.'):
+                netloc = netloc[4:]
+            self.base_url = f"{parsed.scheme}://{netloc}"
+            self.base_domain = netloc
 
             # If URL has a path (not just domain), set max_depth to 0 to only crawl that page
             has_path = parsed.path and parsed.path not in ('/', '')
@@ -686,6 +690,9 @@ class WebCrawler:
 
                         current_url, depth = url_info
 
+                        # Mark as visited to prevent re-crawling
+                        self.link_manager.mark_visited(current_url)
+
                         # Skip if depth exceeded
                         if depth > self.config['max_depth']:
                             continue
@@ -1050,6 +1057,9 @@ class WebCrawler:
                         break
 
                     current_url, depth = url_info
+
+                    # Mark as visited to prevent re-crawling
+                    self.link_manager.mark_visited(current_url)
 
                     if depth <= self.config['max_depth']:
                         # SMOOTH RATE LIMITING: Only apply if delay > 0

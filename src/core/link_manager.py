@@ -7,8 +7,24 @@ from collections import deque
 class LinkManager:
     """Manages link discovery, tracking, and extraction"""
 
+    @staticmethod
+    def normalize_url(url):
+        """Normalize a URL: strip trailing slash, strip www prefix, remove fragments."""
+        parsed = urlparse(url)
+        # Normalize netloc: remove www. prefix
+        netloc = parsed.netloc
+        if netloc.startswith('www.'):
+            netloc = netloc[4:]
+        # Normalize path: strip trailing slash (but keep root '/')
+        path = parsed.path.rstrip('/') or '/'
+        # Rebuild
+        normalized = f"{parsed.scheme}://{netloc}{path}"
+        if parsed.query:
+            normalized += f"?{parsed.query}"
+        return normalized
+
     def __init__(self, base_domain):
-        self.base_domain = base_domain
+        self.base_domain = base_domain.replace('www.', '', 1) if base_domain.startswith('www.') else base_domain
         self.visited_urls = set()
         self.discovered_urls = deque()
         self.all_discovered_urls = set()
@@ -22,6 +38,7 @@ class LinkManager:
     def extract_links(self, soup, current_url, depth, should_crawl_callback):
         """Extract links from HTML and add to discovery queue"""
         links = soup.find_all('a', href=True)
+        current_normalized = self.normalize_url(current_url)
 
         for link in links:
             href = link['href'].strip()
@@ -31,23 +48,20 @@ class LinkManager:
             # Convert relative URLs to absolute
             absolute_url = urljoin(current_url, href)
 
-            # Clean URL (remove fragment)
-            parsed = urlparse(absolute_url)
-            clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-            if parsed.query:
-                clean_url += f"?{parsed.query}"
+            # Normalize URL (strips trailing slash, www, fragments)
+            clean_url = self.normalize_url(absolute_url)
 
             # Thread-safe checking and adding
             with self.urls_lock:
                 # Track source page for this URL
                 if clean_url not in self.source_pages:
                     self.source_pages[clean_url] = []
-                if current_url not in self.source_pages[clean_url]:
-                    self.source_pages[clean_url].append(current_url)
+                if current_normalized not in self.source_pages[clean_url]:
+                    self.source_pages[clean_url].append(current_normalized)
 
                 if (clean_url not in self.visited_urls and
                     clean_url not in self.all_discovered_urls and
-                    clean_url != current_url):
+                    clean_url != current_normalized):
 
                     # Check if this URL should be crawled
                     if should_crawl_callback(clean_url):
@@ -57,6 +71,7 @@ class LinkManager:
     def collect_all_links(self, soup, source_url, crawl_results):
         """Collect all links for the Links tab display"""
         links = soup.find_all('a', href=True)
+        source_normalized = self.normalize_url(source_url)
 
         for link in links:
             href = link['href'].strip()
@@ -73,17 +88,14 @@ class LinkManager:
             # Convert relative URLs to absolute
             try:
                 absolute_url = urljoin(source_url, href)
-                parsed_target = urlparse(absolute_url)
 
-                # Clean URL (remove fragment)
-                clean_url = f"{parsed_target.scheme}://{parsed_target.netloc}{parsed_target.path}"
-                if parsed_target.query:
-                    clean_url += f"?{parsed_target.query}"
+                # Normalize URL
+                clean_url = self.normalize_url(absolute_url)
+                parsed_target = urlparse(clean_url)
 
                 # Determine if link is internal or external
                 target_domain_clean = parsed_target.netloc.replace('www.', '', 1)
-                base_domain_clean = self.base_domain.replace('www.', '', 1)
-                is_internal = target_domain_clean == base_domain_clean
+                is_internal = target_domain_clean == self.base_domain
 
                 # Find the status of the target URL if we've crawled it
                 target_status = None
@@ -96,7 +108,7 @@ class LinkManager:
                 placement = self._detect_link_placement(link)
 
                 link_data = {
-                    'source_url': source_url,
+                    'source_url': source_normalized,
                     'target_url': clean_url,
                     'anchor_text': anchor_text or '(no text)',
                     'is_internal': is_internal,
@@ -109,8 +121,8 @@ class LinkManager:
                 with self.urls_lock:
                     if clean_url not in self.source_pages:
                         self.source_pages[clean_url] = []
-                    if source_url not in self.source_pages[clean_url]:
-                        self.source_pages[clean_url].append(source_url)
+                    if source_normalized not in self.source_pages[clean_url]:
+                        self.source_pages[clean_url].append(source_normalized)
 
                 # Thread-safe adding to links collection with duplicate checking
                 with self.links_lock:
@@ -159,15 +171,15 @@ class LinkManager:
         """Check if URL is internal to the base domain"""
         parsed_url = urlparse(url)
         url_domain_clean = parsed_url.netloc.replace('www.', '', 1)
-        base_domain_clean = self.base_domain.replace('www.', '', 1)
-        return url_domain_clean == base_domain_clean
+        return url_domain_clean == self.base_domain
 
     def add_url(self, url, depth):
         """Add a URL to the discovery queue"""
+        normalized = self.normalize_url(url)
         with self.urls_lock:
-            if url not in self.all_discovered_urls and url not in self.visited_urls:
-                self.all_discovered_urls.add(url)
-                self.discovered_urls.append((url, depth))
+            if normalized not in self.all_discovered_urls and normalized not in self.visited_urls:
+                self.all_discovered_urls.add(normalized)
+                self.discovered_urls.append((normalized, depth))
 
     def mark_visited(self, url):
         """Mark a URL as visited"""
