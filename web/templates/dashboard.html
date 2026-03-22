@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Crawl History - LibreCrawl</title>
+    <script>(function(){var t=localStorage.getItem('librecrawl_theme');if(t==='light')document.documentElement.setAttribute('data-theme','light');})()</script>
     <link rel="stylesheet" href="/static/css/styles.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
@@ -247,6 +248,74 @@
 
         @keyframes spin {
             to { transform: rotate(360deg); }
+        }
+
+        /* Dark theme overrides — dashboard defaults are light */
+        html[data-theme="dark"] body {
+            background: #1a1d29;
+            color: #e2e8f0;
+        }
+        html[data-theme="dark"] .header h1 {
+            color: #f1f5f9;
+        }
+        html[data-theme="dark"] .header p {
+            color: #94a3b8;
+        }
+        html[data-theme="dark"] .stat-card {
+            background: rgba(37, 41, 67, 0.98);
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+        }
+        html[data-theme="dark"] .stat-label {
+            color: #94a3b8;
+        }
+        html[data-theme="dark"] .stat-value {
+            color: #f1f5f9;
+        }
+        html[data-theme="dark"] .table-container {
+            background: rgba(37, 41, 67, 0.98);
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+        }
+        html[data-theme="dark"] thead {
+            background: rgba(42, 47, 74, 0.8);
+            border-bottom: 2px solid #475569;
+        }
+        html[data-theme="dark"] th {
+            color: #a78bfa;
+        }
+        html[data-theme="dark"] td {
+            border-top: 1px solid #374151;
+            color: #e2e8f0;
+        }
+        html[data-theme="dark"] tbody tr:hover {
+            background: rgba(255, 255, 255, 0.04);
+        }
+        html[data-theme="dark"] .url-link {
+            color: #8b5cf6;
+        }
+        html[data-theme="dark"] .empty-state h3 {
+            color: #e2e8f0;
+        }
+        html[data-theme="dark"] .empty-state p {
+            color: #94a3b8;
+        }
+        html[data-theme="dark"] .loading {
+            color: #94a3b8;
+        }
+        html[data-theme="dark"] .spinner {
+            border-color: #374151;
+            border-top-color: #8b5cf6;
+        }
+        html[data-theme="dark"] .btn-primary {
+            background: #3b82f6;
+        }
+        html[data-theme="dark"] .btn-primary:hover {
+            background: #2563eb;
+        }
+        html[data-theme="dark"] .btn-secondary {
+            background: #4b5563;
+        }
+        html[data-theme="dark"] .btn-secondary:hover {
+            background: #374151;
         }
     </style>
 </head>

@@ -2,38 +2,24 @@
 User authentication database module
 Handles user registration, login, and verification
 """
-import sqlite3
 import bcrypt
 import os
 import secrets
 from datetime import datetime, timedelta
-from contextlib import contextmanager
 
-# Database file location - stored in data/ for Docker volume persistence
-DB_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'users.db')
-
-@contextmanager
-def get_db():
-    """Context manager for database connections"""
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row  # Return rows as dictionaries
-    try:
-        yield conn
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        raise e
-    finally:
-        conn.close()
+from src.db import (
+    get_db, get_cursor, get_last_id, returning_id,
+    ph, serial_pk, now_minus_interval,
+    DB_TYPE, IntegrityError
+)
 
 def init_db():
     """Initialize the database with users and settings tables"""
-    os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
     with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
+        cursor = get_cursor(conn)
+        cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {serial_pk()},
                 username TEXT UNIQUE NOT NULL,
                 email TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
@@ -43,7 +29,7 @@ def init_db():
                 last_login TIMESTAMP
             )
         ''')
-        cursor.execute('''
+        cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS user_settings (
                 user_id INTEGER PRIMARY KEY,
                 settings_json TEXT NOT NULL,
@@ -51,9 +37,9 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
             )
         ''')
-        cursor.execute('''
+        cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS crawl_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {serial_pk()},
                 user_id INTEGER NOT NULL,
                 started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 completed_at TIMESTAMP,
@@ -63,9 +49,9 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
             )
         ''')
-        cursor.execute('''
+        cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS guest_crawls (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {serial_pk()},
                 ip_address TEXT NOT NULL,
                 crawl_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -76,9 +62,9 @@ def init_db():
         ''')
 
         # Email verification tokens table
-        cursor.execute('''
+        cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS verification_tokens (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {serial_pk()},
                 user_id INTEGER NOT NULL,
                 token TEXT UNIQUE NOT NULL,
                 app_source TEXT NOT NULL,
@@ -94,24 +80,32 @@ def init_db():
         ''')
 
         # API keys table for programmatic access
-        cursor.execute('''
+        cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS api_keys (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {serial_pk()},
                 user_id INTEGER,
                 key_hash TEXT NOT NULL,
                 name TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_used TIMESTAMP,
-                is_active BOOLEAN DEFAULT 1,
+                is_active BOOLEAN DEFAULT TRUE,
                 FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
             )
         ''')
 
         # Add tier column to existing users table if it doesn't exist
-        try:
-            cursor.execute("ALTER TABLE users ADD COLUMN tier TEXT DEFAULT 'guest'")
-        except:
-            pass  # Column already exists
+        if DB_TYPE == 'postgres':
+            cursor.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE users ADD COLUMN tier TEXT DEFAULT 'guest';
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+            """)
+        else:
+            try:
+                cursor.execute("ALTER TABLE users ADD COLUMN tier TEXT DEFAULT 'guest'")
+            except:
+                pass  # Column already exists
 
         print("Database initialized successfully")
 
@@ -154,11 +148,11 @@ def create_user(username, email, password):
 
         # Insert into database
         with get_db() as conn:
-            cursor = conn.cursor()
+            cursor = get_cursor(conn)
 
             # Check if email exists but unverified
-            cursor.execute('''
-                SELECT id, verified FROM users WHERE email = ?
+            cursor.execute(f'''
+                SELECT id, verified FROM users WHERE email = {ph()}
             ''', (email,))
             existing = cursor.fetchone()
 
@@ -167,22 +161,22 @@ def create_user(username, email, password):
                     return False, "Email already registered and verified", None
                 else:
                     # Update unverified account with new username and password
-                    cursor.execute('''
+                    cursor.execute(f'''
                         UPDATE users
-                        SET username = ?, password_hash = ?
-                        WHERE id = ?
+                        SET username = {ph()}, password_hash = {ph()}
+                        WHERE id = {ph()}
                     ''', (username, password_hash, existing['id']))
                     return True, "resend", existing['id']
 
             # Create new user
-            cursor.execute('''
+            cursor.execute(f'''
                 INSERT INTO users (username, email, password_hash, verified)
-                VALUES (?, ?, ?, 0)
-            ''', (username, email, password_hash))
+                VALUES ({ph(4)}){returning_id()}
+            ''', (username, email, password_hash, 0))
 
-            return True, "Registration successful! Please wait for admin verification.", cursor.lastrowid
+            return True, "Registration successful! Please wait for admin verification.", get_last_id(cursor)
 
-    except sqlite3.IntegrityError as e:
+    except IntegrityError() as e:
         if 'username' in str(e):
             return False, "Username already exists", None
         else:
@@ -198,11 +192,11 @@ def authenticate_user(username, password):
     """
     try:
         with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
+            cursor = get_cursor(conn)
+            cursor.execute(f'''
                 SELECT id, username, email, password_hash, verified, tier
                 FROM users
-                WHERE username = ?
+                WHERE username = {ph()}
             ''', (username,))
 
             user = cursor.fetchone()
@@ -219,10 +213,10 @@ def authenticate_user(username, password):
                 return False, "Account not verified yet. Please wait for admin approval.", None
 
             # Update last login time
-            cursor.execute('''
+            cursor.execute(f'''
                 UPDATE users
                 SET last_login = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE id = {ph()}
             ''', (user['id'],))
 
             user_data = {
@@ -242,11 +236,11 @@ def get_user_by_id(user_id):
     """Get user information by ID"""
     try:
         with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
+            cursor = get_cursor(conn)
+            cursor.execute(f'''
                 SELECT id, username, email, verified, created_at, last_login
                 FROM users
-                WHERE id = ?
+                WHERE id = {ph()}
             ''', (user_id,))
 
             user = cursor.fetchone()
@@ -262,7 +256,7 @@ def get_all_users():
     """Get all users (for admin purposes)"""
     try:
         with get_db() as conn:
-            cursor = conn.cursor()
+            cursor = get_cursor(conn)
             cursor.execute('''
                 SELECT id, username, email, verified, created_at, last_login
                 FROM users
@@ -280,8 +274,8 @@ def verify_user(user_id):
     """Verify a user account (for admin purposes)"""
     try:
         with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('UPDATE users SET verified = 1 WHERE id = ?', (user_id,))
+            cursor = get_cursor(conn)
+            cursor.execute(f'UPDATE users SET verified = 1 WHERE id = {ph()}', (user_id,))
         return True, "User verified successfully"
     except Exception as e:
         print(f"Error verifying user: {e}")
@@ -293,10 +287,10 @@ def save_user_settings(user_id, settings_dict):
     try:
         settings_json = json.dumps(settings_dict)
         with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
+            cursor = get_cursor(conn)
+            cursor.execute(f'''
                 INSERT INTO user_settings (user_id, settings_json, updated_at)
-                VALUES (?, ?, CURRENT_TIMESTAMP)
+                VALUES ({ph(2)}, CURRENT_TIMESTAMP)
                 ON CONFLICT(user_id) DO UPDATE SET
                     settings_json = excluded.settings_json,
                     updated_at = CURRENT_TIMESTAMP
@@ -311,11 +305,11 @@ def get_user_settings(user_id):
     import json
     try:
         with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
+            cursor = get_cursor(conn)
+            cursor.execute(f'''
                 SELECT settings_json
                 FROM user_settings
-                WHERE user_id = ?
+                WHERE user_id = {ph()}
             ''', (user_id,))
 
             result = cursor.fetchone()
@@ -330,8 +324,8 @@ def delete_user_settings(user_id):
     """Delete settings for a user"""
     try:
         with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('DELETE FROM user_settings WHERE user_id = ?', (user_id,))
+            cursor = get_cursor(conn)
+            cursor.execute(f'DELETE FROM user_settings WHERE user_id = {ph()}', (user_id,))
         return True
     except Exception as e:
         print(f"Error deleting user settings: {e}")
@@ -345,8 +339,8 @@ def set_user_tier(user_id, tier):
 
     try:
         with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('UPDATE users SET tier = ? WHERE id = ?', (tier, user_id))
+            cursor = get_cursor(conn)
+            cursor.execute(f'UPDATE users SET tier = {ph()} WHERE id = {ph()}', (tier, user_id))
         return True, f"User tier updated to {tier}"
     except Exception as e:
         print(f"Error setting user tier: {e}")
@@ -356,8 +350,8 @@ def get_user_tier(user_id):
     """Get tier for a user"""
     try:
         with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT tier FROM users WHERE id = ?', (user_id,))
+            cursor = get_cursor(conn)
+            cursor.execute(f'SELECT tier FROM users WHERE id = {ph()}', (user_id,))
             result = cursor.fetchone()
             return result['tier'] if result else 'guest'
     except Exception as e:
@@ -372,12 +366,12 @@ def log_crawl_start(user_id, base_url):
 
     try:
         with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
+            cursor = get_cursor(conn)
+            cursor.execute(f'''
                 INSERT INTO crawl_history (user_id, base_url, status)
-                VALUES (?, ?, 'running')
+                VALUES ({ph(2)}, 'running'){returning_id()}
             ''', (user_id, base_url))
-            return cursor.lastrowid
+            return get_last_id(cursor)
     except Exception as e:
         print(f"Error logging crawl start: {e}")
         return None
@@ -386,13 +380,13 @@ def log_crawl_complete(crawl_id, urls_crawled, status='completed'):
     """Log when a crawl completes"""
     try:
         with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
+            cursor = get_cursor(conn)
+            cursor.execute(f'''
                 UPDATE crawl_history
                 SET completed_at = CURRENT_TIMESTAMP,
-                    urls_crawled = ?,
-                    status = ?
-                WHERE id = ?
+                    urls_crawled = {ph()},
+                    status = {ph()}
+                WHERE id = {ph()}
             ''', (urls_crawled, status, crawl_id))
         return True
     except Exception as e:
@@ -403,10 +397,10 @@ def log_guest_crawl(ip_address):
     """Log a guest crawl by IP address"""
     try:
         with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
+            cursor = get_cursor(conn)
+            cursor.execute(f'''
                 INSERT INTO guest_crawls (ip_address)
-                VALUES (?)
+                VALUES ({ph()})
             ''', (ip_address,))
         return True
     except Exception as e:
@@ -417,12 +411,12 @@ def get_guest_crawls_last_24h(ip_address):
     """Get number of crawls from this IP in last 24 hours"""
     try:
         with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
+            cursor = get_cursor(conn)
+            cursor.execute(f'''
                 SELECT COUNT(*) as count
                 FROM guest_crawls
-                WHERE ip_address = ?
-                AND crawl_time >= datetime('now', '-24 hours')
+                WHERE ip_address = {ph()}
+                AND crawl_time >= {now_minus_interval(24, 'hours')}
             ''', (ip_address,))
             result = cursor.fetchone()
             return result['count'] if result else 0
@@ -438,12 +432,12 @@ def get_crawls_last_24h(user_id):
 
     try:
         with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
+            cursor = get_cursor(conn)
+            cursor.execute(f'''
                 SELECT COUNT(*) as count
                 FROM crawl_history
-                WHERE user_id = ?
-                AND started_at >= datetime('now', '-24 hours')
+                WHERE user_id = {ph()}
+                AND started_at >= {now_minus_interval(24, 'hours')}
             ''', (user_id,))
             result = cursor.fetchone()
             return result['count'] if result else 0
@@ -455,13 +449,13 @@ def get_user_crawl_history(user_id, limit=50):
     """Get crawl history for a user"""
     try:
         with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
+            cursor = get_cursor(conn)
+            cursor.execute(f'''
                 SELECT id, base_url, started_at, completed_at, urls_crawled, status
                 FROM crawl_history
-                WHERE user_id = ?
+                WHERE user_id = {ph()}
                 ORDER BY started_at DESC
-                LIMIT ?
+                LIMIT {ph()}
             ''', (user_id, limit))
             return [dict(row) for row in cursor.fetchall()]
     except Exception as e:
@@ -482,17 +476,17 @@ def create_verification_token(user_id, app_source='main'):
         expires_at = datetime.now() + timedelta(hours=24)
 
         with get_db() as conn:
-            cursor = conn.cursor()
+            cursor = get_cursor(conn)
             # Delete any existing unused tokens for this user
-            cursor.execute('''
+            cursor.execute(f'''
                 DELETE FROM verification_tokens
-                WHERE user_id = ? AND used = 0
+                WHERE user_id = {ph()} AND used = 0
             ''', (user_id,))
 
             # Create new token
-            cursor.execute('''
+            cursor.execute(f'''
                 INSERT INTO verification_tokens (user_id, token, app_source, expires_at)
-                VALUES (?, ?, ?, ?)
+                VALUES ({ph(4)})
             ''', (user_id, token, app_source, expires_at))
 
         return token
@@ -507,14 +501,14 @@ def verify_token(token):
     """
     try:
         with get_db() as conn:
-            cursor = conn.cursor()
+            cursor = get_cursor(conn)
 
             # Find the token
-            cursor.execute('''
+            cursor.execute(f'''
                 SELECT vt.id, vt.user_id, vt.app_source, vt.expires_at, vt.used, u.email
                 FROM verification_tokens vt
                 JOIN users u ON vt.user_id = u.id
-                WHERE vt.token = ?
+                WHERE vt.token = {ph()}
             ''', (token,))
 
             result = cursor.fetchone()
@@ -526,18 +520,20 @@ def verify_token(token):
                 return False, "This verification link has already been used", None, None
 
             # Check if expired
-            expires_at = datetime.fromisoformat(result['expires_at'])
-            if datetime.now() > expires_at:
+            expires_at_val = result['expires_at']
+            if isinstance(expires_at_val, str):
+                expires_at_val = datetime.fromisoformat(expires_at_val)
+            if datetime.now() > expires_at_val:
                 return False, "This verification link has expired", None, None
 
             # Mark user as verified
-            cursor.execute('''
-                UPDATE users SET verified = 1 WHERE id = ?
+            cursor.execute(f'''
+                UPDATE users SET verified = 1 WHERE id = {ph()}
             ''', (result['user_id'],))
 
             # Mark token as used
-            cursor.execute('''
-                UPDATE verification_tokens SET used = 1 WHERE id = ?
+            cursor.execute(f'''
+                UPDATE verification_tokens SET used = 1 WHERE id = {ph()}
             ''', (result['id'],))
 
             conn.commit()
@@ -552,11 +548,11 @@ def get_user_by_email(email):
     """Get user information by email"""
     try:
         with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
+            cursor = get_cursor(conn)
+            cursor.execute(f'''
                 SELECT id, username, email, verified, tier
                 FROM users
-                WHERE email = ?
+                WHERE email = {ph()}
             ''', (email,))
 
             user = cursor.fetchone()
@@ -579,12 +575,12 @@ def create_api_key(user_id, name='default'):
         key_hash = bcrypt.hashpw(key.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
         with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
+            cursor = get_cursor(conn)
+            cursor.execute(f'''
                 INSERT INTO api_keys (user_id, key_hash, name)
-                VALUES (?, ?, ?)
+                VALUES ({ph(3)}){returning_id()}
             ''', (user_id, key_hash, name))
-            key_id = cursor.lastrowid
+            key_id = get_last_id(cursor)
 
         return key_id, key
     except Exception as e:
@@ -599,7 +595,7 @@ def validate_api_key(key):
 
     try:
         with get_db() as conn:
-            cursor = conn.cursor()
+            cursor = get_cursor(conn)
             cursor.execute('''
                 SELECT ak.id, ak.user_id, ak.key_hash, u.tier
                 FROM api_keys ak
@@ -610,7 +606,7 @@ def validate_api_key(key):
                 if bcrypt.checkpw(key.encode('utf-8'), row['key_hash'].encode('utf-8')):
                     # Update last_used
                     cursor.execute(
-                        'UPDATE api_keys SET last_used = CURRENT_TIMESTAMP WHERE id = ?',
+                        f'UPDATE api_keys SET last_used = CURRENT_TIMESTAMP WHERE id = {ph()}',
                         (row['id'],)
                     )
                     conn.commit()
@@ -625,11 +621,11 @@ def list_api_keys(user_id):
     """List API keys for a user (without the actual key)."""
     try:
         with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
+            cursor = get_cursor(conn)
+            cursor.execute(f'''
                 SELECT id, name, created_at, last_used, is_active
                 FROM api_keys
-                WHERE user_id = ?
+                WHERE user_id = {ph()}
                 ORDER BY created_at DESC
             ''', (user_id,))
             return [dict(row) for row in cursor.fetchall()]
@@ -642,9 +638,9 @@ def revoke_api_key(key_id, user_id):
     """Revoke an API key (must belong to user)."""
     try:
         with get_db() as conn:
-            cursor = conn.cursor()
+            cursor = get_cursor(conn)
             cursor.execute(
-                'UPDATE api_keys SET is_active = 0 WHERE id = ? AND user_id = ?',
+                f'UPDATE api_keys SET is_active = 0 WHERE id = {ph()} AND user_id = {ph()}',
                 (key_id, user_id)
             )
             return cursor.rowcount > 0

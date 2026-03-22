@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>LibreCrawl - SEO Spider</title>
+    <script>(function(){var t=localStorage.getItem('librecrawl_theme');if(t==='light')document.documentElement.setAttribute('data-theme','light');var l=localStorage.getItem('librecrawl_layout')||'sidebar';document.documentElement.setAttribute('data-layout',l);})()</script>
     <link rel="stylesheet" href="/static/css/styles.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
@@ -14,7 +15,8 @@
             <div class="header-content">
                 <h1 class="app-title">LibreCrawl</h1>
                 <div class="header-actions">
-                    <span id="userInfo" style="margin-right: 15px; color: #6b7280; font-size: 14px;"></span>
+                    <span id="userInfo" class="user-info-text"></span>
+                    <button class="btn btn-secondary" id="themeToggleBtn" onclick="toggleTheme()" title="Switch to light theme" style="padding: 8px 10px; line-height: 1;"></button>
                     <button class="btn btn-secondary" onclick="openDashboard()">Dashboard</button>
                     <button class="btn btn-secondary" onclick="openSettings()">Settings</button>
                     <button class="btn btn-secondary" onclick="exportData()">Export</button>
@@ -57,6 +59,18 @@
                         </svg>
                         Clear
                     </button>
+                    <button class="btn btn-secondary" onclick="openFiltersModal()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/>
+                        </svg>
+                        Filters
+                    </button>
+                    <button class="btn btn-secondary" onclick="openStatsModal()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M18 20V10M12 20V4M6 20v-6"/>
+                        </svg>
+                        Stats
+                    </button>
                 </div>
             </div>
             <div class="progress-container" id="progressContainer" style="display: none;">
@@ -69,125 +83,45 @@
 
         <!-- Main Content -->
         <main class="main-content">
-            <!-- Sidebar -->
-            <aside class="sidebar">
-                <div class="sidebar-section">
-                    <h3 class="sidebar-title">Filters</h3>
-                    <div class="filter-tree">
-                        <div class="filter-group">
-                            <div class="filter-item" onclick="toggleFilter('internal')">
-                                <span class="filter-name">Internal</span>
-                                <span class="filter-count" id="internal-count">0</span>
-                            </div>
-                            <div class="filter-item" onclick="toggleFilter('external')">
-                                <span class="filter-name">External</span>
-                                <span class="filter-count" id="external-count">0</span>
-                            </div>
-                        </div>
-
-                        <div class="filter-group">
-                            <div class="filter-header">Response Codes</div>
-                            <div class="filter-subgroup">
-                                <div class="filter-item" onclick="toggleFilter('2xx')">
-                                    <span class="filter-name">2xx Success</span>
-                                    <span class="filter-count" id="2xx-count">0</span>
-                                </div>
-                                <div class="filter-item" onclick="toggleFilter('3xx')">
-                                    <span class="filter-name">3xx Redirect</span>
-                                    <span class="filter-count" id="3xx-count">0</span>
-                                </div>
-                                <div class="filter-item" onclick="toggleFilter('4xx')">
-                                    <span class="filter-name">4xx Client Error</span>
-                                    <span class="filter-count" id="4xx-count">0</span>
-                                </div>
-                                <div class="filter-item" onclick="toggleFilter('5xx')">
-                                    <span class="filter-name">5xx Server Error</span>
-                                    <span class="filter-count" id="5xx-count">0</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="filter-group">
-                            <div class="filter-header">Content Type</div>
-                            <div class="filter-subgroup">
-                                <div class="filter-item" onclick="toggleFilter('html')">
-                                    <span class="filter-name">HTML</span>
-                                    <span class="filter-count" id="html-count">0</span>
-                                </div>
-                                <div class="filter-item" onclick="toggleFilter('css')">
-                                    <span class="filter-name">CSS</span>
-                                    <span class="filter-count" id="css-count">0</span>
-                                </div>
-                                <div class="filter-item" onclick="toggleFilter('js')">
-                                    <span class="filter-name">JavaScript</span>
-                                    <span class="filter-count" id="js-count">0</span>
-                                </div>
-                                <div class="filter-item" onclick="toggleFilter('images')">
-                                    <span class="filter-name">Images</span>
-                                    <span class="filter-count" id="images-count">0</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="sidebar-section">
-                    <h3 class="sidebar-title">Statistics</h3>
-                    <div class="stats-container">
-                        <div class="stat-item">
-                            <span class="stat-label">URLs Discovered</span>
-                            <span class="stat-value" id="discoveredCount">0</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="stat-label">URLs Crawled</span>
-                            <span class="stat-value" id="crawledCount">0</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="stat-label">Crawl Depth</span>
-                            <span class="stat-value" id="crawlDepth">0</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="stat-label">Speed</span>
-                            <span class="stat-value" id="crawlSpeed">0 URLs/sec</span>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="sidebar-section">
-                    <h3 class="sidebar-title">Data Size</h3>
-                    <div class="stats-container">
-                        <div class="stat-item">
-                            <span class="stat-label">Crawl Data</span>
-                            <span class="stat-value" id="memCurrent">0 MB</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="stat-label">Per URL</span>
-                            <span class="stat-value" id="memPeak">0 KB/URL</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="stat-label">Est. for 1M URLs</span>
-                            <span class="stat-value" id="memEstimate1M">0 MB</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="stat-label">System Available</span>
-                            <span class="stat-value" id="memAvailable">0 MB</span>
-                        </div>
-                    </div>
-                </div>
-            </aside>
-
             <!-- Content Area -->
             <div class="content-area">
                 <div class="tab-container">
                     <div class="tab-header">
-                        <button class="tab-btn active" onclick="switchTab('overview')">Overview</button>
-                        <button class="tab-btn" onclick="switchTab('internal')">Internal</button>
-                        <button class="tab-btn" onclick="switchTab('external')">External</button>
-                        <button class="tab-btn" onclick="switchTab('status-codes')">Status Codes</button>
-                        <button class="tab-btn" onclick="switchTab('links')">Links</button>
-                        <button class="tab-btn" onclick="switchTab('issues')">Issues</button>
-                        <button class="tab-btn" onclick="switchTab('pagespeed')">PageSpeed</button>
-                        <button class="tab-btn" onclick="switchTab('visualization')">Visualization</button>
+                        <button class="tab-btn active" onclick="switchTab('overview')" data-tooltip="Overview">
+                            <span class="tab-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg></span>
+                            <span class="tab-label">Overview</span>
+                        </button>
+                        <button class="tab-btn" onclick="switchTab('internal')" data-tooltip="Internal">
+                            <span class="tab-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg></span>
+                            <span class="tab-label">Internal</span>
+                        </button>
+                        <button class="tab-btn" onclick="switchTab('external')" data-tooltip="External">
+                            <span class="tab-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></span>
+                            <span class="tab-label">External</span>
+                        </button>
+                        <button class="tab-btn" onclick="switchTab('status-codes')" data-tooltip="Status Codes">
+                            <span class="tab-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 9h16M4 15h16M10 3v18M14 3v18"/></svg></span>
+                            <span class="tab-label">Status Codes</span>
+                        </button>
+                        <button class="tab-btn" onclick="switchTab('links')" data-tooltip="Links">
+                            <span class="tab-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg></span>
+                            <span class="tab-label">Links</span>
+                        </button>
+                        <button class="tab-btn" onclick="switchTab('issues')" data-tooltip="Issues">
+                            <span class="tab-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
+                            <span class="tab-label">Issues</span>
+                        </button>
+                        <button class="tab-btn" onclick="switchTab('pagespeed')" data-tooltip="PageSpeed">
+                            <span class="tab-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span>
+                            <span class="tab-label">PageSpeed</span>
+                        </button>
+                        <button class="tab-btn" onclick="switchTab('visualization')" data-tooltip="Visualization">
+                            <span class="tab-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg></span>
+                            <span class="tab-label">Visualization</span>
+                        </button>
+                        <button class="collapse-sidebar-btn" onclick="toggleSidebarCollapse()" title="Toggle sidebar">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="11 17 6 12 11 7"/><polyline points="18 17 13 12 18 7"/></svg>
+                        </button>
                     </div>
 
                     <div class="tab-content">
@@ -197,6 +131,7 @@
                                     <thead>
                                         <tr>
                                             <th>Address</th>
+                                            <th title="In Sitemap">SM</th>
                                             <th>Status</th>
                                             <th>Title</th>
                                             <th>Meta Desc</th>
@@ -225,6 +160,7 @@
                                     <thead>
                                         <tr>
                                             <th>Address</th>
+                                            <th title="In Sitemap">SM</th>
                                             <th>Status</th>
                                             <th>Content Type</th>
                                             <th>Size</th>
@@ -282,14 +218,14 @@
                                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
                                             <h3 class="links-section-title">🔗 Internal Links</h3>
                                             <div style="display: flex; gap: 10px; align-items: center;">
-                                                <select onchange="filterInternalLinks(this.value)" style="padding: 6px 12px; border-radius: 6px; border: 1px solid #4b5563; background: #1f2937; color: white; font-size: 13px;">
+                                                <select onchange="filterInternalLinks(this.value)" class="links-filter-control">
                                                     <option value="all">All Status Codes</option>
                                                     <option value="2xx">2xx Success</option>
                                                     <option value="3xx">3xx Redirect</option>
                                                     <option value="4xx">4xx Client Error</option>
                                                     <option value="5xx">5xx Server Error</option>
                                                 </select>
-                                                <input type="text" placeholder="Search..." oninput="searchInternalLinks(this.value)" style="padding: 6px 12px; border-radius: 6px; border: 1px solid #4b5563; background: #1f2937; color: white; font-size: 13px; width: 200px;">
+                                                <input type="text" placeholder="Search..." oninput="searchInternalLinks(this.value)" class="links-search-input" style="width: 200px;">
                                             </div>
                                         </div>
                                         <div class="table-container internal-links-container">
@@ -314,14 +250,14 @@
                                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
                                             <h3 class="links-section-title">🌐 External Links</h3>
                                             <div style="display: flex; gap: 10px; align-items: center;">
-                                                <select onchange="filterExternalLinks(this.value)" style="padding: 6px 12px; border-radius: 6px; border: 1px solid #4b5563; background: #1f2937; color: white; font-size: 13px;">
+                                                <select onchange="filterExternalLinks(this.value)" class="links-filter-control">
                                                     <option value="all">All Status Codes</option>
                                                     <option value="2xx">2xx Success</option>
                                                     <option value="3xx">3xx Redirect</option>
                                                     <option value="4xx">4xx Client Error</option>
                                                     <option value="5xx">5xx Server Error</option>
                                                 </select>
-                                                <input type="text" placeholder="Search..." oninput="searchExternalLinks(this.value)" style="padding: 6px 12px; border-radius: 6px; border: 1px solid #4b5563; background: #1f2937; color: white; font-size: 13px; width: 200px;">
+                                                <input type="text" placeholder="Search..." oninput="searchExternalLinks(this.value)" class="links-search-input" style="width: 200px;">
                                             </div>
                                         </div>
                                         <div class="table-container external-links-container">
@@ -464,7 +400,7 @@
                                         <span>5xx Error</span>
                                     </div>
                                     <div class="legend-item">
-                                        <span class="legend-color" style="background: #6b7280;"></span>
+                                        <span class="legend-color" style="background: var(--text-dim);"></span>
                                         <span>Other</span>
                                     </div>
                                 </div>
@@ -514,6 +450,8 @@
                     <button class="settings-tab-btn" onclick="switchSettingsTab('issues')">Issue Exclusion</button>
                     <button class="settings-tab-btn" onclick="switchSettingsTab('customcss')">Custom CSS</button>
                     <button class="settings-tab-btn" onclick="switchSettingsTab('advanced')">Advanced</button>
+                    <button class="settings-tab-btn" onclick="switchSettingsTab('appearance')">Appearance</button>
+                    <button class="settings-tab-btn" onclick="switchSettingsTab('social')">Social</button>
                 </div>
 
                 <!-- Crawler Settings -->
@@ -620,7 +558,7 @@
                         <input type="password" id="googleApiKey" placeholder="Enter your Google PageSpeed Insights API key">
                         <span class="setting-help">
                             API key for higher rate limits (25k requests/day vs limited without key).
-                            <a href="https://developers.google.com/speed/docs/insights/v5/get-started" target="_blank" style="color: #8b5cf6;">Get API key here</a>
+                            <a href="https://developers.google.com/speed/docs/insights/v5/get-started" target="_blank" style="color: var(--accent-2);">Get API key here</a>
                         </span>
                     </div>
 
@@ -629,7 +567,7 @@
                         <input type="password" id="google_places_api_key" placeholder="Enter your Google Places API key">
                         <span class="setting-help">
                             Required for the GBP (Google Business Profile) plugin. Uses the Places API (New).
-                            <a href="https://console.cloud.google.com/apis/library/places-backend.googleapis.com" target="_blank" style="color: #8b5cf6;">Enable &amp; get API key here</a>
+                            <a href="https://console.cloud.google.com/apis/library/places-backend.googleapis.com" target="_blank" style="color: var(--accent-2);">Enable &amp; get API key here</a>
                         </span>
                     </div>
                 </div>
@@ -879,7 +817,7 @@
 *.json"></textarea>
                         <span class="setting-help">Use * for wildcards. Examples: /admin/*, *.json, /test/*</span>
                         <div style="margin-top: 10px;">
-                            <button type="button" onclick="resetIssueExclusions()" style="background: #6b7280; padding: 8px 16px; border-radius: 6px; border: none; color: white; cursor: pointer;">
+                            <button type="button" onclick="resetIssueExclusions()" style="background: var(--text-dim); padding: 8px 16px; border-radius: 6px; border: none; color: white; cursor: pointer;">
                                 Reset to Defaults
                             </button>
                             <span class="setting-help" style="margin-left: 10px;">Restore the default exclusion patterns</span>
@@ -929,7 +867,7 @@
                     <div class="setting-group">
                         <div style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 6px; padding: 12px;">
                             <strong>🎨 Example Customizations:</strong><br><br>
-                            <code style="display: block; background: #1f2937; padding: 10px; border-radius: 4px; margin: 8px 0; font-size: 13px; color: #e5e7eb;">
+                            <code style="display: block; background: var(--surface-1); padding: 10px; border-radius: 4px; margin: 8px 0; font-size: 13px; color: var(--text-body);">
                             /* Dark purple header */<br>
                             .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }<br><br>
                             /* Green accent buttons */<br>
@@ -938,6 +876,35 @@
                             .data-table { font-size: 14px; }
                             </code>
                         </div>
+                    </div>
+                </div>
+
+                <!-- Appearance Settings -->
+                <div id="appearance-settings" class="settings-tab-content">
+                    <h3>Appearance</h3>
+                    <div class="setting-group">
+                        <label>Color Theme</label>
+                        <div style="display: flex; gap: 20px; margin-top: 8px;">
+                            <label class="checkbox-label" style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                                <input type="radio" name="theme" value="dark" style="accent-color: var(--accent-2);"> Dark
+                            </label>
+                            <label class="checkbox-label" style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                                <input type="radio" name="theme" value="light" style="accent-color: var(--accent-2);"> Light
+                            </label>
+                        </div>
+                        <span class="setting-help">Your preferred color scheme. Saved in this browser.</span>
+                    </div>
+                    <div class="setting-group">
+                        <label>Navigation Layout</label>
+                        <div style="display: flex; gap: 20px; margin-top: 8px;">
+                            <label class="checkbox-label" style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                                <input type="radio" name="layout" value="sidebar" style="accent-color: var(--accent-2);"> Sidebar
+                            </label>
+                            <label class="checkbox-label" style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                                <input type="radio" name="layout" value="top" style="accent-color: var(--accent-2);"> Top tabs
+                            </label>
+                        </div>
+                        <span class="setting-help">Sidebar shows icons and can be collapsed. Saved in this browser.</span>
                     </div>
                 </div>
 
@@ -996,6 +963,30 @@
                         <span class="setting-help">Additional HTTP headers to send (one per line)</span>
                     </div>
                 </div>
+
+                <!-- Social Account Connections -->
+                <div id="social-settings" class="settings-tab-content">
+                    <h3>Social Account Connections</h3>
+                    <p class="setting-help">Connected accounts are used by the Social Profiles plugin to extract authenticated data. Your password is never stored after login — only the session token is saved.</p>
+
+                    <!-- Connected accounts — rendered by JS -->
+                    <div id="social-accounts-list"></div>
+
+                    <!-- Empty state — shown by JS when no accounts are connected -->
+                    <div id="social-empty-state" style="display:none;padding:24px 0;text-align:center;color:var(--text-muted);font-size:13px">
+                        No accounts connected yet. Click "+ Add Account" below to get started.
+                    </div>
+
+                    <!-- Add new account -->
+                    <div style="margin-top:16px">
+                        <button class="btn btn-secondary" id="social-add-toggle-btn" onclick="toggleSocialAddPanel()">+ Add Account</button>
+                        <div id="social-add-panel" style="display:none;margin-top:12px;padding:16px;background:var(--bg-card);border:1px solid var(--border-alt);border-radius:8px">
+                            <div style="margin-bottom:12px;color:var(--text-body);font-size:13px;font-weight:500">Select a platform to connect:</div>
+                            <div id="social-platform-picker" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+                            <div id="social-connect-form" style="display:none;margin-top:16px"></div>
+                        </div>
+                    </div>
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="resetSettings()">Reset to Defaults</button>
@@ -1010,6 +1001,128 @@
     <script src="/static/js/column-resize.js"></script>
     <script src="/static/js/visualization.js"></script>
     <script src="/static/js/plugin-loader.js"></script>
+    <!-- Filters Modal -->
+    <div class="modal-overlay" id="filtersModal" style="display:none;" onclick="if(event.target===this)closeFiltersModal()">
+        <div class="compact-modal">
+            <div class="compact-modal-header">
+                <h3>Filters</h3>
+                <button class="modal-close-btn" onclick="closeFiltersModal()">&times;</button>
+            </div>
+            <div class="compact-modal-body">
+                <div class="filter-tree">
+                    <div class="filter-group">
+                        <div class="filter-item" onclick="toggleFilter('internal')">
+                            <span class="filter-name">Internal</span>
+                            <span class="filter-count" id="internal-count">0</span>
+                        </div>
+                        <div class="filter-item" onclick="toggleFilter('external')">
+                            <span class="filter-name">External</span>
+                            <span class="filter-count" id="external-count">0</span>
+                        </div>
+                    </div>
+                    <div class="filter-group">
+                        <div class="filter-header">Response Codes</div>
+                        <div class="filter-subgroup">
+                            <div class="filter-item" onclick="toggleFilter('2xx')">
+                                <span class="filter-name">2xx Success</span>
+                                <span class="filter-count" id="2xx-count">0</span>
+                            </div>
+                            <div class="filter-item" onclick="toggleFilter('3xx')">
+                                <span class="filter-name">3xx Redirect</span>
+                                <span class="filter-count" id="3xx-count">0</span>
+                            </div>
+                            <div class="filter-item" onclick="toggleFilter('4xx')">
+                                <span class="filter-name">4xx Client Error</span>
+                                <span class="filter-count" id="4xx-count">0</span>
+                            </div>
+                            <div class="filter-item" onclick="toggleFilter('5xx')">
+                                <span class="filter-name">5xx Server Error</span>
+                                <span class="filter-count" id="5xx-count">0</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="filter-group">
+                        <div class="filter-header">Content Type</div>
+                        <div class="filter-subgroup">
+                            <div class="filter-item" onclick="toggleFilter('html')">
+                                <span class="filter-name">HTML</span>
+                                <span class="filter-count" id="html-count">0</span>
+                            </div>
+                            <div class="filter-item" onclick="toggleFilter('css')">
+                                <span class="filter-name">CSS</span>
+                                <span class="filter-count" id="css-count">0</span>
+                            </div>
+                            <div class="filter-item" onclick="toggleFilter('js')">
+                                <span class="filter-name">JavaScript</span>
+                                <span class="filter-count" id="js-count">0</span>
+                            </div>
+                            <div class="filter-item" onclick="toggleFilter('images')">
+                                <span class="filter-name">Images</span>
+                                <span class="filter-count" id="images-count">0</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Stats Modal -->
+    <div class="modal-overlay" id="statsModal" style="display:none;" onclick="if(event.target===this)closeStatsModal()">
+        <div class="compact-modal">
+            <div class="compact-modal-header">
+                <h3>Statistics</h3>
+                <button class="modal-close-btn" onclick="closeStatsModal()">&times;</button>
+            </div>
+            <div class="compact-modal-body">
+                <div class="stats-container">
+                    <div class="stat-item">
+                        <span class="stat-label">URLs Discovered</span>
+                        <span class="stat-value" id="discoveredCount">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">URLs Crawled</span>
+                        <span class="stat-value" id="crawledCount">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Crawl Depth</span>
+                        <span class="stat-value" id="crawlDepth">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Speed</span>
+                        <span class="stat-value" id="crawlSpeed">0 URLs/sec</span>
+                    </div>
+                </div>
+                <h4 style="color: var(--accent-1); margin: 20px 0 12px; font-size: 15px;">Data Size</h4>
+                <div class="stats-container">
+                    <div class="stat-item">
+                        <span class="stat-label">Crawl Data</span>
+                        <span class="stat-value" id="memCurrent">0 MB</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Per URL</span>
+                        <span class="stat-value" id="memPeak">0 KB/URL</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Est. for 1M URLs</span>
+                        <span class="stat-value" id="memEstimate1M">0 MB</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">System Available</span>
+                        <span class="stat-value" id="memAvailable">0 MB</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="loading-overlay-content">
+            <div class="loading-spinner"></div>
+            <div class="loading-overlay-text" id="loadingText">Loading...</div>
+            <div class="loading-overlay-subtext" id="loadingSubtext"></div>
+        </div>
+    </div>
     <script src="/static/js/app.js"></script>
     <script src="/static/js/dashboard.js"></script>
     <script src="/static/js/settings.js"></script>

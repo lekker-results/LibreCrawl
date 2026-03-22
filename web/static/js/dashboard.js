@@ -6,8 +6,9 @@ async function openDashboard() {
     const modal = document.getElementById('dashboardModal');
     const content = document.getElementById('dashboardContent');
 
-    // Show modal
+    // Show modal with loading state
     modal.style.display = 'flex';
+    content.innerHTML = '<div style="text-align:center;padding:40px;"><div class="loading-spinner"></div><div style="color:var(--text-primary);">Loading crawl history...</div></div>';
 
     // Load crawls
     try {
@@ -15,14 +16,14 @@ async function openDashboard() {
         const data = await response.json();
 
         if (!data.success) {
-            content.innerHTML = `<p style="color: #ef4444;">Error loading crawls: ${data.error}</p>`;
+            content.innerHTML = `<p style="color: var(--status-error);">Error loading crawls: ${data.error}</p>`;
             return;
         }
 
         const crawls = data.crawls || [];
 
         if (crawls.length === 0) {
-            content.innerHTML = `<p style="text-align: center; color: #9ca3af;">No saved crawls found.</p>`;
+            content.innerHTML = `<p style="text-align: center; color: var(--text-dim);">No saved crawls found.</p>`;
             return;
         }
 
@@ -45,7 +46,7 @@ async function openDashboard() {
             const date = new Date(crawl.started_at).toLocaleString();
             const domain = crawl.base_domain || crawl.base_url;
             const status = crawl.status || 'unknown';
-            const statusColor = status === 'completed' ? '#10b981' : status === 'running' ? '#3b82f6' : status === 'paused' ? '#f59e0b' : '#6b7280';
+            const statusColor = status === 'completed' ? 'var(--status-success)' : status === 'running' ? 'var(--status-info)' : status === 'paused' ? 'var(--status-warning)' : 'var(--text-dim)';
 
             html += `
                 <tr>
@@ -71,7 +72,7 @@ async function openDashboard() {
 
     } catch (error) {
         console.error('Error loading dashboard:', error);
-        content.innerHTML = `<p style="color: #ef4444;">Error loading crawls.</p>`;
+        content.innerHTML = `<p style="color: var(--status-error);">Error loading crawls.</p>`;
     }
 }
 
@@ -80,8 +81,11 @@ function closeDashboard() {
 }
 
 async function loadCrawlFromDashboard(crawlId) {
-    if (!confirm('Load this crawl? Any unsaved current data will be lost.')) return;
+    // Only confirm if there's an active unsaved crawl
+    const hasUnsavedData = crawlState.isRunning || (crawlState.urls.length > 0 && !crawlState.loadedCrawlId);
+    if (hasUnsavedData && !confirm('Load this crawl? Any unsaved current data will be lost.')) return;
 
+    showLoading('Loading crawl data...', 'This may take a moment for large crawls');
     try {
         // Call backend to load data into current crawler
         const response = await fetch(`/api/crawls/${crawlId}/load`, {
@@ -111,6 +115,7 @@ async function loadCrawlFromDashboard(crawlId) {
         crawlState.issues = statusData.issues || [];
         crawlState.stats = statusData.stats || {};
         crawlState.baseUrl = statusData.stats?.baseUrl || '';
+        crawlState.loadedCrawlId = crawlId;
 
         // Set URL input
         if (crawlState.baseUrl) {
@@ -159,6 +164,8 @@ async function loadCrawlFromDashboard(crawlId) {
     } catch (error) {
         console.error('Error loading crawl:', error);
         alert('Error loading crawl');
+    } finally {
+        hideLoading();
     }
 }
 

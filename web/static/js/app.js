@@ -1,9 +1,71 @@
+// Loading overlay utility
+function showLoading(text = 'Loading...', subtext = '') {
+    const overlay = document.getElementById('loadingOverlay');
+    const textEl = document.getElementById('loadingText');
+    const subtextEl = document.getElementById('loadingSubtext');
+    if (overlay) {
+        textEl.textContent = text;
+        subtextEl.textContent = subtext;
+        overlay.classList.add('active');
+    }
+}
+function hideLoading() {
+    const overlay = document.getElementById('loadingOverlay');
+    if (overlay) overlay.classList.remove('active');
+}
+
+// Sidebar collapse toggle
+function toggleSidebarCollapse() {
+    const header = document.querySelector('.tab-header');
+    if (!header) return;
+    header.classList.toggle('collapsed');
+    localStorage.setItem('librecrawl_sidebar_collapsed', header.classList.contains('collapsed'));
+}
+// Restore collapsed state on load + sidebar tooltips
+document.addEventListener('DOMContentLoaded', function() {
+    if (localStorage.getItem('librecrawl_sidebar_collapsed') === 'true') {
+        const header = document.querySelector('.tab-header');
+        if (header) header.classList.add('collapsed');
+    }
+
+    // JS tooltip for collapsed sidebar (CSS tooltips get clipped by overflow:hidden parents)
+    let tip = null;
+    document.querySelector('.tab-header').addEventListener('mouseover', function(e) {
+        const btn = e.target.closest('.tab-btn');
+        const header = e.target.closest('.tab-header');
+        if (!btn || !header || !header.classList.contains('collapsed')) return;
+        const text = btn.getAttribute('data-tooltip');
+        if (!text) return;
+        if (!tip) {
+            tip = document.createElement('div');
+            tip.className = 'sidebar-tooltip';
+            document.body.appendChild(tip);
+        }
+        const rect = btn.getBoundingClientRect();
+        tip.textContent = text;
+        tip.style.top = (rect.top + rect.height / 2) + 'px';
+        tip.style.left = (rect.right + 8) + 'px';
+        tip.style.display = 'block';
+    });
+    document.querySelector('.tab-header').addEventListener('mouseout', function(e) {
+        const btn = e.target.closest('.tab-btn');
+        if (btn && tip) tip.style.display = 'none';
+    });
+});
+
+// Filters & Stats modals
+function openFiltersModal() { document.getElementById('filtersModal').style.display = 'flex'; }
+function closeFiltersModal() { document.getElementById('filtersModal').style.display = 'none'; }
+function openStatsModal() { document.getElementById('statsModal').style.display = 'flex'; }
+function closeStatsModal() { document.getElementById('statsModal').style.display = 'none'; }
+
 // Application State
 let crawlState = {
     isRunning: false,
     isPaused: false,
     startTime: null,
     baseUrl: null,
+    loadedCrawlId: null,
     urls: [],
     links: [],
     issues: [],
@@ -222,6 +284,7 @@ function startCrawl() {
     crawlState.isPaused = false;
     crawlState.startTime = new Date();
     crawlState.baseUrl = url;
+    crawlState.loadedCrawlId = null;
 
     // Initialize incremental poller for new crawl
     if (!incrementalPoller) {
@@ -1072,34 +1135,34 @@ function filterIssues(filterType) {
             btn.classList.add('active');
             // Set active state colors
             if (filter === 'all') {
-                btn.style.background = '#374151';
-                btn.style.borderColor = '#4b5563';
-                btn.style.color = 'white';
+                btn.style.background = 'var(--surface-1)';
+                btn.style.borderColor = 'var(--border-standard)';
+                btn.style.color = 'var(--text-body)';
             } else if (filter === 'error') {
-                btn.style.background = 'rgba(239, 68, 68, 0.2)';
-                btn.style.borderColor = 'rgba(239, 68, 68, 0.5)';
+                btn.style.background = 'var(--status-error-bg)';
+                btn.style.borderColor = 'var(--status-error-border)';
             } else if (filter === 'warning') {
-                btn.style.background = 'rgba(245, 158, 11, 0.2)';
-                btn.style.borderColor = 'rgba(245, 158, 11, 0.5)';
+                btn.style.background = 'var(--status-warning-bg)';
+                btn.style.borderColor = 'var(--status-warning-border)';
             } else if (filter === 'info') {
-                btn.style.background = 'rgba(59, 130, 246, 0.2)';
-                btn.style.borderColor = 'rgba(59, 130, 246, 0.5)';
+                btn.style.background = 'var(--status-info-bg)';
+                btn.style.borderColor = 'var(--status-info-border)';
             }
         } else {
             // Reset inactive state colors
             if (filter === 'all') {
                 btn.style.background = 'transparent';
-                btn.style.borderColor = '#4b5563';
-                btn.style.color = '#9ca3af';
+                btn.style.borderColor = 'var(--border-standard)';
+                btn.style.color = 'var(--text-dim)';
             } else if (filter === 'error') {
-                btn.style.background = 'rgba(239, 68, 68, 0.1)';
-                btn.style.borderColor = 'rgba(239, 68, 68, 0.3)';
+                btn.style.background = 'var(--status-error-bg)';
+                btn.style.borderColor = 'var(--status-error-border)';
             } else if (filter === 'warning') {
-                btn.style.background = 'rgba(245, 158, 11, 0.1)';
-                btn.style.borderColor = 'rgba(245, 158, 11, 0.3)';
+                btn.style.background = 'var(--status-warning-bg)';
+                btn.style.borderColor = 'var(--status-warning-border)';
             } else if (filter === 'info') {
-                btn.style.background = 'rgba(59, 130, 246, 0.1)';
-                btn.style.borderColor = 'rgba(59, 130, 246, 0.3)';
+                btn.style.background = 'var(--status-info-bg)';
+                btn.style.borderColor = 'var(--status-info-border)';
             }
         }
     });
@@ -1473,11 +1536,11 @@ async function loadUserInfo() {
                 // Show crawls remaining for guests
                 const remaining = user.crawls_remaining;
                 userInfoElement.textContent = `Guest (${remaining}/3 crawls remaining)`;
-                userInfoElement.style.color = remaining === 0 ? '#dc2626' : '#6b7280';
+                userInfoElement.style.color = remaining === 0 ? 'var(--status-error)' : 'var(--text-dim)';
             } else {
                 // Show username and tier for registered users
                 userInfoElement.textContent = `${user.username} (${user.tier})`;
-                userInfoElement.style.color = '#6b7280';
+                userInfoElement.style.color = 'var(--text-dim)';
             }
         }
     } catch (error) {
@@ -1486,6 +1549,7 @@ async function loadUserInfo() {
 }
 
 async function exportData() {
+    showLoading('Preparing export...', 'Gathering crawl data');
     try {
         // Get current settings to determine export format and fields
         const settingsResponse = await fetch('/api/get_settings');
@@ -1594,6 +1658,8 @@ async function exportData() {
     } catch (error) {
         console.error('Export error:', error);
         showNotification('Export failed', 'error');
+    } finally {
+        hideLoading();
     }
 }
 
@@ -1720,9 +1786,9 @@ function showUrlDetails(url) {
                                 <ul style="list-style: none; padding: 0; margin: 10px 0;">
                                     ${urlData.linked_from.slice(0, 20).map(sourceUrl => {
                                         const escapedUrl = escapeHtml(sourceUrl);
-                                        return `<li style="padding: 5px 0; word-break: break-all;"><a href="${escapedUrl}" target="_blank" style="color: #8b5cf6; text-decoration: none;">${escapedUrl}</a></li>`;
+                                        return `<li style="padding: 5px 0; word-break: break-all;"><a href="${escapedUrl}" target="_blank" style="color: var(--accent-2); text-decoration: none;">${escapedUrl}</a></li>`;
                                     }).join('')}
-                                    ${urlData.linked_from.length > 20 ? `<li style="padding: 5px 0; font-style: italic; color: #9ca3af;">... and ${urlData.linked_from.length - 20} more</li>` : ''}
+                                    ${urlData.linked_from.length > 20 ? `<li style="padding: 5px 0; font-style: italic; color: var(--text-dim);">... and ${urlData.linked_from.length - 20} more</li>` : ''}
                                 </ul>
                             </div>
                         </div>
@@ -2104,6 +2170,17 @@ function loadCrawl() {
 // Virtual Scroller Render Functions
 // ========================================
 
+function shortenUrl(url) {
+    try {
+        const parsed = new URL(url);
+        const baseDomain = crawlState.baseUrl ? new URL(crawlState.baseUrl).hostname : null;
+        if (baseDomain && parsed.hostname === baseDomain) {
+            return parsed.pathname + parsed.search;
+        }
+        return url;
+    } catch { return url; }
+}
+
 function renderOverviewRow(row, urlData, index) {
     const analyticsInfo = formatAnalyticsInfo(urlData.analytics || {});
     const ogTagsCount = Object.keys(urlData.og_tags || {}).length;
@@ -2111,9 +2188,11 @@ function renderOverviewRow(row, urlData, index) {
     const linksInfo = `${urlData.internal_links || 0}/${urlData.external_links || 0}`;
     const imagesCount = (urlData.images || []).length;
     const jsRendered = urlData.javascript_rendered ? '✅ JS' : '';
+    const smIcon = urlData.in_sitemap ? '✅' : '⚠️';
 
     const cells = [
-        urlData.url,
+        `<a href="${urlData.url}" target="_blank" rel="noopener" style="color: var(--accent-1); text-decoration: none;">${shortenUrl(urlData.url)}</a>`,
+        smIcon,
         urlData.status_code,
         urlData.title || '',
         (urlData.meta_description || '').substring(0, 50) + (urlData.meta_description && urlData.meta_description.length > 50 ? '...' : ''),
@@ -2131,7 +2210,7 @@ function renderOverviewRow(row, urlData, index) {
 
     cells.forEach(cellData => {
         const cell = document.createElement('td');
-        if (typeof cellData === 'string' && cellData.includes('<button')) {
+        if (typeof cellData === 'string' && (cellData.includes('<button') || cellData.includes('<a '))) {
             cell.innerHTML = cellData;
         } else {
             cell.textContent = cellData;
@@ -2141,8 +2220,10 @@ function renderOverviewRow(row, urlData, index) {
 }
 
 function renderInternalRow(row, urlData, index) {
+    const smIcon = urlData.in_sitemap ? '✅' : '⚠️';
     const cells = [
-        urlData.url,
+        `<a href="${urlData.url}" target="_blank" rel="noopener" style="color: var(--accent-1); text-decoration: none;">${shortenUrl(urlData.url)}</a>`,
+        smIcon,
         urlData.status_code,
         urlData.content_type || '',
         urlData.size || 0,
@@ -2151,14 +2232,18 @@ function renderInternalRow(row, urlData, index) {
 
     cells.forEach(cellData => {
         const cell = document.createElement('td');
-        cell.textContent = cellData;
+        if (typeof cellData === 'string' && cellData.includes('<a ')) {
+            cell.innerHTML = cellData;
+        } else {
+            cell.textContent = cellData;
+        }
         row.appendChild(cell);
     });
 }
 
 function renderExternalRow(row, urlData, index) {
     const cells = [
-        urlData.url,
+        `<a href="${urlData.url}" target="_blank" rel="noopener" style="color: var(--accent-1); text-decoration: none;">${urlData.url}</a>`,
         urlData.status_code,
         urlData.content_type || '',
         urlData.size || 0,
@@ -2167,7 +2252,11 @@ function renderExternalRow(row, urlData, index) {
 
     cells.forEach(cellData => {
         const cell = document.createElement('td');
-        cell.textContent = cellData;
+        if (typeof cellData === 'string' && cellData.includes('<a ')) {
+            cell.innerHTML = cellData;
+        } else {
+            cell.textContent = cellData;
+        }
         row.appendChild(cell);
     });
 }
@@ -2203,11 +2292,11 @@ function renderIssueRow(row, issue, index) {
 
     // Set row style based on issue type
     if (issue.type === 'error') {
-        row.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
+        row.style.backgroundColor = 'var(--status-error-bg)';
     } else if (issue.type === 'warning') {
-        row.style.backgroundColor = 'rgba(245, 158, 11, 0.1)';
+        row.style.backgroundColor = 'var(--status-warning-bg)';
     } else {
-        row.style.backgroundColor = 'rgba(59, 130, 246, 0.1)';
+        row.style.backgroundColor = 'var(--status-info-bg)';
     }
 
     // Create type indicator

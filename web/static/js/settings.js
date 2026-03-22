@@ -58,6 +58,9 @@ let defaultSettings = {
     // Custom CSS styling
     customCSS: '',
 
+    // Theme preference
+    theme: 'dark',
+
     // Issue exclusion patterns
     issueExclusionPatterns: `# WordPress admin & system paths
 /wp-admin/*
@@ -311,7 +314,17 @@ function resetIssueExclusions() {
 }
 
 async function openSettings() {
-    // Get user tier info
+    // Show modal immediately with current settings
+    populateSettingsForm();
+    document.getElementById('settingsModal').style.display = 'flex';
+
+    // Focus first input
+    const firstInput = document.querySelector('.settings-tab-content.active input, .settings-tab-content.active select');
+    if (firstInput) {
+        setTimeout(() => firstInput.focus(), 100);
+    }
+
+    // Fetch user tier in background and apply restrictions
     let userTier = 'guest';
     try {
         const response = await fetch('/api/user/info');
@@ -325,33 +338,22 @@ async function openSettings() {
 
     // Block guests from accessing settings
     if (userTier === 'guest') {
+        document.getElementById('settingsModal').style.display = 'none';
         alert('Settings are not available for guest users.\n\nPlease register for a free account to customize crawler settings, filters, and more.\n\nClick "Logout" and then "Register here" to create an account.');
         return;
     }
 
     // Hide tabs based on tier
     applyTierRestrictions(userTier);
-
-    // Load current settings into form
-    populateSettingsForm();
-
-    // Show modal
-    document.getElementById('settingsModal').style.display = 'flex';
-
-    // Focus first input
-    const firstInput = document.querySelector('.settings-tab-content.active input, .settings-tab-content.active select');
-    if (firstInput) {
-        setTimeout(() => firstInput.focus(), 100);
-    }
 }
 
 function applyTierRestrictions(tier) {
     // Define which tabs each tier can see - MUST MATCH HTML TAB NAMES
     const tierTabs = {
         'guest': [],  // No settings tabs for guests
-        'user': ['crawler', 'export', 'issues'],
-        'extra': ['crawler', 'export', 'issues', 'filters', 'requests', 'customcss', 'javascript'],
-        'admin': ['crawler', 'requests', 'filters', 'export', 'javascript', 'issues', 'customcss', 'advanced']
+        'user': ['crawler', 'export', 'issues', 'appearance'],
+        'extra': ['crawler', 'export', 'issues', 'filters', 'requests', 'customcss', 'javascript', 'appearance'],
+        'admin': ['crawler', 'requests', 'filters', 'export', 'javascript', 'issues', 'customcss', 'advanced', 'appearance', 'social']
     };
 
     const allowedTabs = tierTabs[tier] || [];
@@ -382,9 +384,9 @@ function applyTierRestrictions(tier) {
         const settingsContent = document.querySelector('.settings-tabs');
         if (settingsContent) {
             const message = document.createElement('div');
-            message.style.cssText = 'padding: 40px; text-align: center; color: #9ca3af; font-size: 16px;';
+            message.style.cssText = 'padding: 40px; text-align: center; color: var(--text-dim); font-size: 16px;';
             message.innerHTML = `
-                <h3 style="color: #f3f4f6; margin-bottom: 16px;">Settings Access Restricted</h3>
+                <h3 style="color: var(--text-body); margin-bottom: 16px;">Settings Access Restricted</h3>
                 <p>Guest accounts cannot modify settings.</p>
                 <p style="margin-top: 8px; font-size: 14px;">Please upgrade your account to access settings.</p>
             `;
@@ -407,9 +409,18 @@ function switchSettingsTab(tabName) {
         content.classList.remove('active');
     });
 
-    // Add active class to selected tab and content
-    event.target.classList.add('active');
-    document.getElementById(tabName + '-settings').classList.add('active');
+    // Add active class to selected tab button (find by matching onclick attribute)
+    const activeBtn = document.querySelector(`.settings-tab-btn[onclick="switchSettingsTab('${tabName}')"]`);
+    if (activeBtn) activeBtn.classList.add('active');
+
+    // Add active class to selected content panel
+    const panel = document.getElementById(tabName + '-settings');
+    if (panel) panel.classList.add('active');
+
+    // Tab-specific activation hooks
+    if (tabName === 'social') {
+        loadSocialStatus();
+    }
 }
 
 function populateSettingsForm() {
@@ -429,6 +440,18 @@ function populateSettingsForm() {
     const exportFieldsCheckboxes = document.querySelectorAll('input[name="exportFields"]');
     exportFieldsCheckboxes.forEach(checkbox => {
         checkbox.checked = currentSettings.exportFields.includes(checkbox.value);
+    });
+
+    // Set theme radio
+    const themeRadio = document.querySelector(`input[name="theme"][value="${currentSettings.theme || 'dark'}"]`);
+    if (themeRadio) themeRadio.checked = true;
+
+    // Set layout radio + apply immediately on change
+    const currentLayout = localStorage.getItem('librecrawl_layout') || 'sidebar';
+    const layoutRadioEl = document.querySelector(`input[name="layout"][value="${currentLayout}"]`);
+    if (layoutRadioEl) layoutRadioEl.checked = true;
+    document.querySelectorAll('input[name="layout"]').forEach(radio => {
+        radio.onchange = () => applyLayout(radio.value);
     });
 
     // Show/hide proxy settings
@@ -485,6 +508,14 @@ function collectSettingsFromForm() {
     const exportFieldsCheckboxes = document.querySelectorAll('input[name="exportFields"]:checked');
     settings.exportFields = Array.from(exportFieldsCheckboxes).map(cb => cb.value);
 
+    // Collect theme
+    const themeRadio = document.querySelector('input[name="theme"]:checked');
+    if (themeRadio) settings.theme = themeRadio.value;
+
+    // Apply layout immediately (stored in localStorage, not server settings)
+    const layoutRadio = document.querySelector('input[name="layout"]:checked');
+    if (layoutRadio) applyLayout(layoutRadio.value);
+
     return settings;
 }
 
@@ -513,6 +544,10 @@ function saveSettings() {
 
     // Apply custom CSS immediately
     applyCustomCSS();
+
+    // Apply theme immediately
+    applyTheme(currentSettings.theme || 'dark');
+    updateThemeToggleButton(currentSettings.theme || 'dark');
 
     // Close settings modal
     closeSettings();
@@ -668,6 +703,11 @@ function loadSettings() {
             // Apply custom CSS after loading settings
             applyCustomCSS();
 
+            // Apply theme
+            const savedTheme = localStorage.getItem('librecrawl_theme') || currentSettings.theme || 'dark';
+            applyTheme(savedTheme);
+            updateThemeToggleButton(savedTheme);
+
             // Sync to backend for crawler configuration
             syncSettingsToBackend();
             return;
@@ -690,10 +730,17 @@ function loadSettings() {
                 console.warn('Failed to load settings, using defaults');
                 currentSettings = { ...defaultSettings };
             }
+            // Apply theme (runs in both success and fallback paths)
+            const savedTheme = localStorage.getItem('librecrawl_theme') || currentSettings.theme || 'dark';
+            applyTheme(savedTheme);
+            updateThemeToggleButton(savedTheme);
         })
         .catch(error => {
             console.error('Error loading settings:', error);
             currentSettings = { ...defaultSettings };
+            const savedTheme = localStorage.getItem('librecrawl_theme') || 'dark';
+            applyTheme(savedTheme);
+            updateThemeToggleButton(savedTheme);
         });
 }
 
@@ -851,6 +898,528 @@ window.getCurrentSettings = function() {
     return currentSettings;
 };
 
+function applyTheme(theme) {
+    if (theme === 'light') {
+        document.documentElement.setAttribute('data-theme', 'light');
+    } else {
+        document.documentElement.removeAttribute('data-theme');
+    }
+    try { localStorage.setItem('librecrawl_theme', theme); } catch(e) {}
+}
+
+function applyLayout(layout) {
+    document.documentElement.setAttribute('data-layout', layout || 'sidebar');
+    try { localStorage.setItem('librecrawl_layout', layout); } catch(e) {}
+}
+
+function updateThemeToggleButton(theme) {
+    const btn = document.getElementById('themeToggleBtn');
+    if (!btn) return;
+    if (theme === 'light') {
+        btn.title = 'Switch to dark theme';
+        btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>`;
+    } else {
+        btn.title = 'Switch to light theme';
+        btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>`;
+    }
+}
+
+function toggleTheme() {
+    const current = localStorage.getItem('librecrawl_theme') || 'dark';
+    const next = current === 'dark' ? 'light' : 'dark';
+    currentSettings.theme = next;
+    applyTheme(next);
+    updateThemeToggleButton(next);
+    // Sync the radio in settings modal if open
+    const radio = document.querySelector(`input[name="theme"][value="${next}"]`);
+    if (radio) radio.checked = true;
+}
+
+// --- Social Account Connections ---
+
+var SOCIAL_PLATFORMS_META = {
+    facebook:  { label: 'Facebook',    icon: '🔵', userPlaceholder: 'your@email.com',     passLabel: 'Password' },
+    instagram: { label: 'Instagram',   icon: '📸', userPlaceholder: 'username',            passLabel: 'Password' },
+    linkedin:  { label: 'LinkedIn',    icon: '💼', userPlaceholder: 'your@email.com',     passLabel: 'Password' },
+    twitter:   { label: 'X / Twitter', icon: '🐦', userPlaceholder: '@username or email', passLabel: 'Password' },
+    tiktok:    { label: 'TikTok',      icon: '🎵', userPlaceholder: 'your@email.com',     passLabel: 'Password' }
+};
+
+function escHtml(str) {
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function _applySocialStatus(socialCookies, socialCredentials) {
+    _renderSocialTab(socialCookies || {}, socialCredentials || {});
+}
+
+function _renderSocialTab(socialCookies, socialCredentials) {
+    var list = document.getElementById('social-accounts-list');
+    var emptyState = document.getElementById('social-empty-state');
+    var picker = document.getElementById('social-platform-picker');
+    if (!list) return;
+
+    // Render connected accounts
+    list.innerHTML = '';
+    var connectedCount = 0;
+    Object.keys(SOCIAL_PLATFORMS_META).forEach(function(platform) {
+        var cookies = socialCookies[platform];
+        if (!cookies || !cookies.length) return;
+        connectedCount++;
+        var meta = SOCIAL_PLATFORMS_META[platform];
+
+        // Token hint: name + first 8 chars of value of first meaningful cookie
+        var tokenHint = '';
+        var tokenName = '';
+        // Prefer known session cookie names
+        var preferredNames = { facebook: 'c_user', instagram: 'sessionid', linkedin: 'li_at', twitter: 'auth_token', tiktok: 'sessionid' };
+        var preferred = preferredNames[platform];
+        var tokenCookie = cookies.find(function(c) { return c.name === preferred; }) || cookies[0];
+        if (tokenCookie) {
+            tokenName = tokenCookie.name;
+            tokenHint = (tokenCookie.value || '').substring(0, 8) + '\u2026';
+        }
+
+        var testPlaceholder = platform === 'twitter' ? 'https://x.com/yourpage' : 'https://' + platform + '.com/yourpage';
+        var card = document.createElement('div');
+        card.style.cssText = 'padding:14px 0;border-bottom:1px solid var(--border-alt)';
+        card.innerHTML =
+            '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">' +
+                '<span style="min-width:140px;color:var(--text-body);font-weight:500">' + escHtml(meta.icon + ' ' + meta.label) + '</span>' +
+                '<span style="font-size:12px;flex:1"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#10b981;margin-right:5px;vertical-align:middle"></span><span style="color:var(--text-body)">Connected</span>' + (tokenName ? '<span style="color:var(--text-muted)"> \u00B7 Token: ' + escHtml(tokenName) + ': ' + escHtml(tokenHint) + '</span>' : '') + '</span>' +
+                '<button class="btn btn-danger" onclick="socialDisconnect(\'' + platform + '\')">Disconnect</button>' +
+            '</div>' +
+            '<div class="setting-group" style="margin-bottom:0">' +
+                '<label style="font-size:12px;color:var(--text-muted)">Test extraction — paste a ' + escHtml(meta.label) + ' URL:</label>' +
+                '<div style="display:flex;gap:8px;align-items:center;margin-top:4px">' +
+                    '<input id="social-test-url-' + platform + '" type="text" placeholder="' + escHtml(testPlaceholder) + '" style="flex:1">' +
+                    '<button class="btn btn-secondary" onclick="testSocialExtraction(\'' + platform + '\')">Test</button>' +
+                '</div>' +
+                '<div id="social-test-result-' + platform + '" style="display:none;margin-top:8px;padding:10px;background:var(--bg-secondary);border-radius:6px;font-size:12px;color:var(--text-body);max-height:200px;overflow-y:auto"></div>' +
+            '</div>';
+        list.appendChild(card);
+    });
+
+    // Empty state
+    if (emptyState) emptyState.style.display = connectedCount === 0 ? 'block' : 'none';
+
+    // Populate platform picker (unconnected platforms only)
+    if (picker) {
+        picker.innerHTML = '';
+        var hasUnconnected = false;
+        Object.keys(SOCIAL_PLATFORMS_META).forEach(function(platform) {
+            var cookies = socialCookies[platform];
+            if (cookies && cookies.length) return;
+            hasUnconnected = true;
+            var meta = SOCIAL_PLATFORMS_META[platform];
+            var btn = document.createElement('button');
+            btn.className = 'btn btn-secondary';
+            btn.textContent = meta.icon + ' ' + meta.label;
+            btn.onclick = (function(p) { return function() { selectSocialPlatform(p, socialCredentials); }; })(platform);
+            picker.appendChild(btn);
+        });
+        var toggleBtn = document.getElementById('social-add-toggle-btn');
+        if (toggleBtn) toggleBtn.style.display = hasUnconnected ? '' : 'none';
+    }
+}
+
+function toggleSocialAddPanel() {
+    var panel = document.getElementById('social-add-panel');
+    if (!panel) return;
+    var isOpen = panel.style.display !== 'none';
+    panel.style.display = isOpen ? 'none' : 'block';
+    var btn = document.getElementById('social-add-toggle-btn');
+    if (btn) btn.textContent = isOpen ? '+ Add Account' : '\u2212 Close';
+    if (isOpen) closeSocialAddForm();
+}
+
+function selectSocialPlatform(platform, socialCredentials) {
+    var meta = SOCIAL_PLATFORMS_META[platform];
+    if (!meta) return;
+    var creds = (socialCredentials || {})[platform] || {};
+    var form = document.getElementById('social-connect-form');
+    if (!form) return;
+    form.style.display = 'block';
+    form.innerHTML =
+        '<div style="font-weight:500;margin-bottom:12px;color:var(--text-body)">' + escHtml(meta.icon + ' Connect ' + meta.label) + '</div>' +
+        '<div class="setting-group" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:0">' +
+            '<div><label>Email / Username</label><input id="social-add-user" type="text" placeholder="' + escHtml(meta.userPlaceholder) + '" autocomplete="off" value="' + escHtml(creds.username || '') + '"></div>' +
+            '<div><label>' + escHtml(meta.passLabel) + '</label><input id="social-add-pass" type="password" placeholder="\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022" autocomplete="new-password" value="' + escHtml(creds.password || '') + '"></div>' +
+        '</div>' +
+        '<div style="display:flex;gap:8px;margin-top:12px">' +
+            '<button class="btn btn-primary" onclick="saveAndConnectSocial(\'' + platform + '\')">Save &amp; Connect</button>' +
+            '<button class="btn btn-secondary" onclick="connectSocialOnly(\'' + platform + '\')">Connect (don\'t save)</button>' +
+            '<button class="btn btn-secondary" onclick="closeSocialAddForm()">Cancel</button>' +
+        '</div>' +
+        '<p class="setting-help" style="margin-top:8px">Credentials are saved to pre-fill the login relay next time. Only the session token is kept after login.</p>';
+    var userInput = form.querySelector('#social-add-user');
+    if (userInput) userInput.focus();
+}
+
+function closeSocialAddForm() {
+    var form = document.getElementById('social-connect-form');
+    if (form) { form.style.display = 'none'; form.innerHTML = ''; }
+}
+
+async function saveAndConnectSocial(platform) {
+    var userInput = document.getElementById('social-add-user');
+    var passInput = document.getElementById('social-add-pass');
+    var username = userInput ? userInput.value.trim() : '';
+    var password = passInput ? passInput.value.trim() : '';
+    try {
+        await fetch('/api/social/credentials', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ platform: platform, username: username, password: password })
+        });
+        if (!window._userSettings) window._userSettings = {};
+        if (!window._userSettings.social_credentials) window._userSettings.social_credentials = {};
+        window._userSettings.social_credentials[platform] = { username: username, password: password };
+    } catch (_) {}
+    connectSocialOnly(platform);
+}
+
+async function connectSocialOnly(platform) {
+    var userInput = document.getElementById('social-add-user');
+    var passInput = document.getElementById('social-add-pass');
+    var username = userInput ? userInput.value.trim() : '';
+    var password = passInput ? passInput.value.trim() : '';
+    if (!username && !password && window._userSettings && window._userSettings.social_credentials) {
+        var cached = window._userSettings.social_credentials[platform] || {};
+        username = cached.username || '';
+        password = cached.password || '';
+    }
+    closeSocialAddForm();
+    var addPanel = document.getElementById('social-add-panel');
+    if (addPanel) addPanel.style.display = 'none';
+    var toggleBtn = document.getElementById('social-add-toggle-btn');
+    if (toggleBtn) toggleBtn.textContent = '+ Add Account';
+    try {
+        var resp = await fetch('/api/social/connect/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ platform: platform, username: username, password: password })
+        });
+        var data = await resp.json();
+        if (!resp.ok || data.error) throw new Error(data.error || 'Failed to start');
+        openSocialLoginModal(platform, data.session_id);
+    } catch (e) {
+        showNotification('Connection failed: ' + e.message, 'error');
+    }
+}
+
+async function testSocialExtraction(platform) {
+    var input = document.getElementById('social-test-url-' + platform);
+    var resultEl = document.getElementById('social-test-result-' + platform);
+    if (!input || !resultEl) return;
+    var url = input.value.trim();
+    if (!url) { showNotification('Enter a URL to test', 'error'); return; }
+
+    // Find the Test button next to this input and disable it
+    var btn = input.parentElement && input.parentElement.querySelector('button');
+    if (btn) { btn.textContent = 'Fetching\u2026'; btn.disabled = true; }
+
+    resultEl.style.display = 'block';
+    resultEl.innerHTML = '<span style="color:var(--text-muted)">Fetching\u2026</span>';
+
+    try {
+        var resp = await fetch('/api/social/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ platform: platform, url: url })
+        });
+        var data = await resp.json();
+        if (!resp.ok || data.error) throw new Error(data.error || 'Request failed');
+        var p = data.profile || {};
+        if (!p || Object.keys(p).length === 0) {
+            resultEl.innerHTML = '<span style="color:var(--text-muted)">No data extracted. Check the URL or try re-connecting.</span>';
+            return;
+        }
+        var rows = [];
+        var fieldMap = [
+            ['title', 'Name'],
+            ['description', 'Description / Bio'],
+            ['about', 'About'],
+            ['tagline', 'Tagline'],
+            ['phone', 'Phone'],
+            ['address', 'Address'],
+            ['followers', 'Followers'],
+            ['posts', 'Posts'],
+            ['subscribers', 'Subscribers'],
+            ['website', 'Website in bio'],
+            ['image', 'Profile image'],
+            ['url', 'Canonical URL']
+        ];
+        fieldMap.forEach(function(pair) {
+            var val = p[pair[0]];
+            if (val) rows.push(
+                '<div style="margin-bottom:6px">' +
+                '<span style="color:var(--text-muted);min-width:140px;display:inline-block">' + escHtml(pair[1]) + ':</span> ' +
+                escHtml(String(val)) + '</div>'
+            );
+        });
+        resultEl.innerHTML = rows.length ? rows.join('') : '<span style="color:var(--text-muted)">Fetched page but no structured fields found.</span>';
+    } catch (e) {
+        resultEl.innerHTML = '<span style="color:#fca5a5">Error: ' + escHtml(e.message) + '</span>';
+    } finally {
+        if (btn) { btn.textContent = 'Test'; btn.disabled = false; }
+    }
+}
+
+function loadSocialStatus() {
+    // Use cached value if available (set after connect/disconnect actions)
+    if (window._userSettings && window._userSettings.social_cookies) {
+        _applySocialStatus(window._userSettings.social_cookies, window._userSettings.social_credentials || {});
+        return;
+    }
+    // Otherwise fetch from backend
+    fetch('/api/get_settings')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            const socialCookies = (data.settings && data.settings.social_cookies) || {};
+            const socialCreds = (data.settings && data.settings.social_credentials) || {};
+            if (!window._userSettings) window._userSettings = {};
+            window._userSettings.social_cookies = socialCookies;
+            window._userSettings.social_credentials = socialCreds;
+            _applySocialStatus(socialCookies, socialCreds);
+        })
+        .catch(function() {
+            _applySocialStatus({}, {});
+        });
+}
+
+async function socialConnect(platform) {
+    var username = '', password = '';
+    if (window._userSettings && window._userSettings.social_credentials) {
+        var cached = window._userSettings.social_credentials[platform] || {};
+        username = cached.username || '';
+        password = cached.password || '';
+    }
+    try {
+        var resp = await fetch('/api/social/connect/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ platform: platform, username: username, password: password })
+        });
+        var data = await resp.json();
+        if (!resp.ok || data.error) throw new Error(data.error || 'Failed to start connection');
+        openSocialLoginModal(platform, data.session_id);
+    } catch (e) {
+        showNotification('Connection failed: ' + e.message, 'error');
+    }
+}
+
+async function saveSocialCredentials(platform) {
+    const userInput = document.getElementById('social-user-' + platform);
+    const passInput = document.getElementById('social-pass-' + platform);
+    if (!userInput || !passInput) return;
+
+    const btn = userInput.closest('.setting-group') && userInput.closest('.setting-group').querySelector('button');
+    const originalText = btn ? btn.textContent : null;
+    if (btn) { btn.textContent = 'Saving…'; btn.disabled = true; }
+
+    try {
+        const saveResp = await fetch('/api/social/credentials', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ platform, username: userInput.value, password: passInput.value })
+        });
+        if (!saveResp.ok) throw new Error('Server returned ' + saveResp.status);
+        if (!window._userSettings) window._userSettings = {};
+        if (!window._userSettings.social_credentials) window._userSettings.social_credentials = {};
+        window._userSettings.social_credentials[platform] = { username: userInput.value, password: passInput.value };
+        if (btn) {
+            btn.textContent = 'Saved ✓';
+            btn.classList.remove('btn-secondary');
+            btn.classList.add('btn-success');
+            setTimeout(function() {
+                btn.textContent = originalText;
+                btn.classList.remove('btn-success');
+                btn.classList.add('btn-secondary');
+                btn.disabled = false;
+            }, 2000);
+        }
+        showNotification(platform + ' credentials saved', 'success');
+    } catch (e) {
+        if (btn) { btn.textContent = originalText; btn.disabled = false; }
+        showNotification('Failed to save credentials: ' + e.message, 'error');
+    }
+}
+
+async function socialDisconnect(platform) {
+    try {
+        const resp = await fetch('/api/social/disconnect/' + platform, { method: 'POST' });
+        if (!resp.ok) throw new Error('Server returned ' + resp.status);
+        // Remove only this platform from local cache, force re-fetch for accurate state
+        if (window._userSettings) delete window._userSettings.social_cookies;
+        loadSocialStatus();
+        showNotification(platform + ' disconnected', 'success');
+    } catch (e) {
+        showNotification('Failed to disconnect: ' + e.message, 'error');
+    }
+}
+
+function openSocialLoginModal(platform, sessionId) {
+    const existing = document.getElementById('social-login-relay-modal');
+    if (existing) existing.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'social-login-relay-modal';
+    modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.8);z-index:10000;display:flex;align-items:center;justify-content:center;';
+    modal.innerHTML = `
+        <div style="background:var(--bg-card);border:1px solid var(--border-standard);border-radius:12px;padding:20px;width:96vw;height:96vh;display:flex;flex-direction:column;overflow:hidden">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+                <h3 style="margin:0;color:var(--text-body)">Connecting ${platform}\u2026</h3>
+                <button id="social-relay-cancel" style="background:var(--surface-1);color:var(--text-body);border:none;padding:6px 12px;border-radius:6px;cursor:pointer">Cancel</button>
+            </div>
+            <div style="color:var(--text-dim);font-size:13px;margin-bottom:12px">
+                Complete any verification steps below. Your password is not stored — only the session token will be saved.
+            </div>
+            <div id="social-relay-status" style="color:#fbbf24;font-size:12px;margin-bottom:10px">Logging in\u2026</div>
+            <div style="border:1px solid var(--border-standard);border-radius:8px;overflow:hidden;background:var(--bg-base);flex:1;min-height:0;position:relative">
+                <img id="social-relay-screenshot" style="width:100%;height:100%;object-fit:contain;display:none;cursor:crosshair" alt="browser screenshot">
+                <div id="social-relay-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--text-dim)">
+                    <div>Starting browser\u2026</div>
+                </div>
+            </div>
+            <div style="margin-top:10px;color:var(--text-dim);font-size:11px">Click on the screenshot to interact. Type to enter text.</div>
+        </div>`;
+
+    document.body.appendChild(modal);
+
+    const img = modal.querySelector('#social-relay-screenshot');
+    const statusEl = modal.querySelector('#social-relay-status');
+    const loadingEl = modal.querySelector('#social-relay-loading');
+    const cancelBtn = modal.querySelector('#social-relay-cancel');
+
+    // Click relay — accounts for object-fit:contain letterbox/pillarbox offset
+    img.addEventListener('click', async function(e) {
+        const rect = img.getBoundingClientRect();
+        const naturalWidth = img.naturalWidth || 1280;
+        const naturalHeight = img.naturalHeight || 800;
+        const imgAspect = naturalWidth / naturalHeight;
+        const containerAspect = rect.width / rect.height;
+        let renderedW, renderedH, offsetX, offsetY;
+        if (containerAspect > imgAspect) {
+            // pillarbox: black bars left/right
+            renderedH = rect.height;
+            renderedW = rect.height * imgAspect;
+            offsetX = (rect.width - renderedW) / 2;
+            offsetY = 0;
+        } else {
+            // letterbox: black bars top/bottom
+            renderedW = rect.width;
+            renderedH = rect.width / imgAspect;
+            offsetX = 0;
+            offsetY = (rect.height - renderedH) / 2;
+        }
+        const x = Math.round((e.clientX - rect.left - offsetX) * (naturalWidth / renderedW));
+        const y = Math.round((e.clientY - rect.top - offsetY) * (naturalHeight / renderedH));
+        await fetch('/api/social/connect/' + sessionId + '/interact', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'click', x: x, y: y })
+        }).catch(function() {});
+    });
+
+    // Keypress relay — skip Ctrl/Meta combos (handled by paste handler)
+    function keyHandler(e) {
+        if (!document.getElementById('social-login-relay-modal')) return;
+        if (e.ctrlKey || e.metaKey) return;
+        const isPrintable = e.key.length === 1;
+        fetch('/api/social/connect/' + sessionId + '/interact', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(isPrintable
+                ? { type: 'type', text: e.key }
+                : { type: 'key', key: e.key })
+        }).catch(function() {});
+    }
+    document.addEventListener('keydown', keyHandler);
+
+    // Clipboard paste relay
+    function pasteHandler(e) {
+        if (!document.getElementById('social-login-relay-modal')) return;
+        e.preventDefault();
+        const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+        if (!text) return;
+        fetch('/api/social/connect/' + sessionId + '/interact', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'type', text: text })
+        }).catch(function() {});
+    }
+    document.addEventListener('paste', pasteHandler);
+
+    // Screenshot poll
+    const screenshotInterval = setInterval(async function() {
+        try {
+            const resp = await fetch('/api/social/connect/' + sessionId + '/screenshot');
+            if (resp.ok) {
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const oldSrc = img.src;
+                img.src = url;
+                img.style.display = 'block';
+                loadingEl.style.display = 'none';
+                if (oldSrc && oldSrc.startsWith('blob:')) URL.revokeObjectURL(oldSrc);
+            }
+        } catch (_) {}
+    }, 200);
+
+    // Status poll
+    const statusInterval = setInterval(async function() {
+        try {
+            const resp = await fetch('/api/social/connect/' + sessionId + '/status');
+            const data = await resp.json();
+            if (data.status === 'awaiting_input') {
+                statusEl.textContent = 'Complete any verification steps in the browser above.';
+                statusEl.style.color = '#fbbf24';
+            } else if (data.status === 'running') {
+                statusEl.textContent = 'Logging in\u2026';
+            } else if (data.status === 'success') {
+                statusEl.textContent = 'Connected' + (data.handle ? ' as ' + data.handle : '') + '!';
+                statusEl.style.color = '#86efac';
+                clearInterval(screenshotInterval);
+                clearInterval(statusInterval);
+                document.removeEventListener('keydown', keyHandler);
+                document.removeEventListener('paste', pasteHandler);
+                setTimeout(function() {
+                    modal.remove();
+                    // Keep settings modal open and visible
+                    var settingsModal = document.getElementById('settingsModal');
+                    if (settingsModal) settingsModal.style.display = 'flex';
+                    // Force re-fetch real cookies from backend (dummy cache would hide token)
+                    if (window._userSettings) delete window._userSettings.social_cookies;
+                    loadSocialStatus();
+                    showNotification(platform + ' connected successfully!', 'success');
+                    // Notify social profiles plugin to refresh its card list
+                    window.dispatchEvent(new CustomEvent('social-account-connected', { detail: { platform: platform } }));
+                }, 2000);
+                return;
+            } else if (data.status === 'failed' || data.status === 'cancelled') {
+                statusEl.textContent = data.status === 'cancelled' ? 'Cancelled' : 'Login failed';
+                statusEl.style.color = '#fca5a5';
+                clearInterval(screenshotInterval);
+                clearInterval(statusInterval);
+                document.removeEventListener('keydown', keyHandler);
+                document.removeEventListener('paste', pasteHandler);
+                setTimeout(function() { modal.remove(); }, 3000);
+                return;
+            }
+        } catch (_) {}
+    }, 1500);
+
+    cancelBtn.addEventListener('click', async function() {
+        clearInterval(screenshotInterval);
+        clearInterval(statusInterval);
+        document.removeEventListener('keydown', keyHandler);
+        document.removeEventListener('paste', pasteHandler);
+        await fetch('/api/social/connect/' + sessionId + '/cancel', { method: 'POST' }).catch(function() {});
+        modal.remove();
+    });
+}
+
 // Apply custom CSS to the page
 function applyCustomCSS() {
     // Remove existing custom CSS if present
@@ -871,3 +1440,15 @@ function applyCustomCSS() {
         console.log('Custom CSS applied');
     }
 }
+
+document.addEventListener('DOMContentLoaded', function() {
+    const tabBar = document.querySelector('.settings-tabs');
+    if (tabBar) {
+        tabBar.addEventListener('wheel', function(e) {
+            if (e.deltaY !== 0) {
+                e.preventDefault();
+                tabBar.scrollLeft += e.deltaY;
+            }
+        }, { passive: false });
+    }
+});

@@ -1,3 +1,4 @@
+import asyncio
 import threading
 import time
 import csv
@@ -11,6 +12,11 @@ import string
 import os
 from io import StringIO
 from datetime import datetime, timedelta
+
+# Load environment variables BEFORE importing src modules (src.db reads DATABASE_URL at import time)
+from dotenv import load_dotenv
+load_dotenv()
+
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for
 from flask_compress import Compress
 from functools import wraps
@@ -18,10 +24,6 @@ from src.crawler import WebCrawler
 from src.settings_manager import SettingsManager
 from src.auth_db import init_db, create_user, authenticate_user, get_user_by_id, log_guest_crawl, get_guest_crawls_last_24h, verify_user, set_user_tier, create_verification_token, verify_token, get_user_by_email, create_api_key, validate_api_key, list_api_keys, revoke_api_key
 from src.email_service import send_verification_email, send_welcome_email
-
-# Load environment variables from .env file
-from dotenv import load_dotenv
-load_dotenv()
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='LibreCrawl - SEO Spider Tool')
@@ -53,47 +55,44 @@ def generate_random_password(length=16):
 
 def auto_login_local_mode():
     """Auto-login for local mode - creates or logs into 'local' admin account"""
-    import sqlite3
+    from src.db import get_db, get_cursor, ph, returning_id, get_last_id
     try:
-        conn = sqlite3.connect(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'users.db'))
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+        with get_db() as conn:
+            cursor = get_cursor(conn)
 
-        # Check if 'local' user exists
-        cursor.execute('SELECT id, username, tier FROM users WHERE username = ?', ('local',))
-        user = cursor.fetchone()
+            # Check if 'local' user exists
+            cursor.execute(f'SELECT id, username, tier FROM users WHERE username = {ph()}', ('local',))
+            user = cursor.fetchone()
 
-        if user:
-            # User exists, just log them in
-            session['user_id'] = user['id']
-            session['username'] = user['username']
-            session['tier'] = 'admin'
-            session.permanent = True
-            print(f"Auto-logged in as existing 'local' user (ID: {user['id']})")
-        else:
-            # Create new local user with random password
-            random_password = generate_random_password()
-            from src.auth_db import hash_password
-            password_hash = hash_password(random_password)
+            if user:
+                # User exists, just log them in
+                session['user_id'] = user['id']
+                session['username'] = user['username']
+                session['tier'] = 'admin'
+                session.permanent = True
+                print(f"Auto-logged in as existing 'local' user (ID: {user['id']})")
+            else:
+                # Create new local user with random password
+                random_password = generate_random_password()
+                from src.auth_db import hash_password
+                password_hash = hash_password(random_password)
 
-            cursor.execute('''
-                INSERT INTO users (username, email, password_hash, verified, tier)
-                VALUES (?, ?, ?, 1, 'admin')
-            ''', ('local', 'local@localhost', password_hash))
-            conn.commit()
+                cursor.execute(f'''
+                    INSERT INTO users (username, email, password_hash, verified, tier)
+                    VALUES ({ph(5)}){returning_id()}
+                ''', ('local', 'local@localhost', password_hash, 1, 'admin'))
 
-            user_id = cursor.lastrowid
+                user_id = get_last_id(cursor)
 
-            # Log in the new user
-            session['user_id'] = user_id
-            session['username'] = 'local'
-            session['tier'] = 'admin'
-            session.permanent = True
+                # Log in the new user
+                session['user_id'] = user_id
+                session['username'] = 'local'
+                session['tier'] = 'admin'
+                session.permanent = True
 
-            print(f"Created and auto-logged in as new 'local' admin user (ID: {user_id})")
-            print(f"Generated password: {random_password}")
+                print(f"Created and auto-logged in as new 'local' admin user (ID: {user_id})")
+                print(f"Generated password: {random_password}")
 
-        conn.close()
         return True
     except Exception as e:
         print(f"Error in auto_login_local_mode: {e}")
@@ -494,14 +493,12 @@ def register():
     if success and LOCAL_MODE:
         try:
             from src.auth_db import verify_user, set_user_tier
+            from src.db import get_db, get_cursor, ph
             # Get the user that was just created
-            import sqlite3
-            conn = sqlite3.connect(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'users.db'))
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute('SELECT id FROM users WHERE username = ?', (username,))
-            user = cursor.fetchone()
-            conn.close()
+            with get_db() as conn:
+                cursor = get_cursor(conn)
+                cursor.execute(f'SELECT id FROM users WHERE username = {ph()}', (username,))
+                user = cursor.fetchone()
 
             if user:
                 verify_user(user['id'])
@@ -1171,21 +1168,19 @@ def crawl_stats():
     try:
         user_id = session.get('user_id')
         from src.crawl_db import get_crawl_count, get_database_size_mb
-        import sqlite3
+        from src.db import get_db, get_cursor, ph
 
         # Get counts by status
-        conn = sqlite3.connect(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'users.db'))
-        cursor = conn.cursor()
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            cursor.execute(f'''
+                SELECT status, COUNT(*) as count
+                FROM crawls
+                WHERE user_id = {ph()}
+                GROUP BY status
+            ''', (user_id,))
 
-        cursor.execute('''
-            SELECT status, COUNT(*) as count
-            FROM crawls
-            WHERE user_id = ?
-            GROUP BY status
-        ''', (user_id,))
-
-        status_counts = {row[0]: row[1] for row in cursor.fetchall()}
-        conn.close()
+            status_counts = {row['status']: row['count'] for row in cursor.fetchall()}
 
         return jsonify({
             'success': True,
@@ -1517,6 +1512,16 @@ def api_keywords_ai_stored():
 
 # --- Google Business Profile (GBP) Endpoints ---
 
+def _domain_from_urls(urls):
+    """Extract bare domain (no www) from the first URL in a crawl URL list."""
+    try:
+        from urllib.parse import urlparse as _up
+        raw = _up(urls[0].get('url', '')).netloc if urls else ''
+        return raw.lstrip('www.') if raw else ''
+    except Exception:
+        return ''
+
+
 def _get_user_google_places_key():
     """Get Google Places API key from user's saved settings."""
     user_id = session.get('user_id')
@@ -1563,9 +1568,11 @@ def api_gbp():
         if not urls:
             return jsonify({'error': 'No crawl data available'}), 404
 
-        # Check cache
-        if crawl_id:
-            cached = load_gbp_data(crawl_id)
+        domain = _domain_from_urls(urls)
+
+        # Check cache (skip if ?refresh=1)
+        if domain and not request.args.get('refresh'):
+            cached = load_gbp_data(domain)
             if cached:
                 return jsonify(cached)
 
@@ -1573,7 +1580,7 @@ def api_gbp():
         if not api_key:
             extracted = extract_business_info(urls)
             result = {
-                'domain': '',
+                'domain': domain,
                 'brand_name': extracted.get('brand_name', ''),
                 'branches': [{
                     'extracted': branch,
@@ -1590,9 +1597,9 @@ def api_gbp():
         # Full GBP lookup
         report = build_gbp_report(urls, api_key)
 
-        # Cache if we have a crawl_id and no errors
-        if crawl_id and not any(b.get('error') for b in report.get('branches', [])):
-            save_gbp_data(crawl_id, report)
+        # Cache by domain if no errors
+        if domain and not any(b.get('error') for b in report.get('branches', [])):
+            save_gbp_data(domain, report)
 
         return jsonify(report)
 
@@ -1610,10 +1617,17 @@ def api_gbp_by_crawl(crawl_id):
     from src.crawl_db import load_gbp_data, save_gbp_data, load_crawled_urls
 
     try:
-        # Check cache first
-        cached = load_gbp_data(crawl_id)
-        if cached:
-            return jsonify(cached)
+        urls = load_crawled_urls(crawl_id)
+        if not urls:
+            return jsonify({'error': 'No crawl data found'}), 404
+
+        domain = _domain_from_urls(urls)
+
+        # Check cache first (skip if ?refresh=1)
+        if domain and not request.args.get('refresh'):
+            cached = load_gbp_data(domain)
+            if cached:
+                return jsonify(cached)
 
         # Resolve API key
         api_key = (
@@ -1622,15 +1636,9 @@ def api_gbp_by_crawl(crawl_id):
             os.getenv('GOOGLE_PLACES_API_KEY', '')
         )
 
-        urls = load_crawled_urls(crawl_id)
-        if not urls:
-            return jsonify({'error': 'No crawl data found'}), 404
-
         # Without API key, return only extracted contact info
         if not api_key:
             extracted = extract_business_info(urls)
-            from urllib.parse import urlparse as _urlparse
-            domain = _urlparse(urls[0].get('url', '')).netloc if urls else ''
             result = {
                 'domain': domain,
                 'brand_name': extracted.get('brand_name', ''),
@@ -1647,8 +1655,8 @@ def api_gbp_by_crawl(crawl_id):
             return jsonify(result)
 
         report = build_gbp_report(urls, api_key)
-        if not any(b.get('error') for b in report.get('branches', [])):
-            save_gbp_data(crawl_id, report)
+        if domain and not any(b.get('error') for b in report.get('branches', [])):
+            save_gbp_data(domain, report)
 
         return jsonify(report)
 
@@ -1679,6 +1687,349 @@ def api_gbp_photo():
     max_width = request.args.get('max_width', 400, type=int)
     photo_url = get_photo_uri(photo_name, api_key, max_width)
     return jsonify({'url': photo_url})
+
+
+# --- Social Profiles Endpoints ---
+
+@app.route('/api/social', methods=['GET', 'POST'])
+@login_required
+def api_social():
+    from src.social_extractor import build_social_report
+    from src.auth_db import get_user_settings
+    fetch_profiles = request.args.get('fetch_profiles') == '1'
+    user_id = session.get('user_id')
+    user_settings = get_user_settings(user_id) or {}
+    session_cookies = user_settings.get('social_cookies', {})
+
+    if request.method == 'POST':
+        body = request.get_json() or {}
+        urls = body.get('urls', [])
+        links = body.get('links', [])
+    else:
+        crawler = get_or_create_crawler()
+        status = crawler.get_status()
+        urls = status.get('urls', [])
+        links = status.get('links', [])
+
+    report = build_social_report(urls, links, fetch_profiles=fetch_profiles, session_cookies=session_cookies)
+    return jsonify(report)
+
+
+@app.route('/api/social/connect/start', methods=['POST'])
+@login_required
+def api_social_connect_start():
+    from src.social_extractor import LoginSession, _login_sessions
+    body = request.get_json() or {}
+    platform = body.get('platform', '').lower()
+    if not platform:
+        return jsonify({'error': 'platform is required'}), 400
+    username = body.get('username') or None
+    password = body.get('password') or None
+    session_id = str(uuid.uuid4())
+    login_sess = LoginSession(session_id, platform, username=username, password=password)
+    _login_sessions[session_id] = login_sess
+    return jsonify({'session_id': session_id})
+
+
+@app.route('/api/social/connect/<session_id>/screenshot', methods=['GET'])
+@login_required
+def api_social_connect_screenshot(session_id):
+    from src.social_extractor import _login_sessions
+    from flask import Response
+    login_sess = _login_sessions.get(session_id)
+    if not login_sess:
+        return jsonify({'error': 'session not found'}), 404
+    if login_sess.screenshot:
+        return Response(login_sess.screenshot, mimetype='image/jpeg')
+    return jsonify({'error': 'no screenshot yet'}), 204
+
+
+@app.route('/api/social/connect/<session_id>/interact', methods=['POST'])
+@login_required
+def api_social_connect_interact(session_id):
+    from src.social_extractor import _login_sessions
+    login_sess = _login_sessions.get(session_id)
+    if not login_sess:
+        return jsonify({'error': 'session not found'}), 404
+    action = request.get_json() or {}
+    login_sess.push_action(action)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/social/connect/<session_id>/status', methods=['GET'])
+@login_required
+def api_social_connect_status(session_id):
+    from src.social_extractor import _login_sessions
+    from src.auth_db import get_user_settings, save_user_settings
+    login_sess = _login_sessions.get(session_id)
+    if not login_sess:
+        return jsonify({'error': 'session not found'}), 404
+    resp = {'status': login_sess.status, 'platform': login_sess.platform}
+    if login_sess.handle:
+        resp['handle'] = login_sess.handle
+    if login_sess.status == 'success':
+        user_id = session.get('user_id')
+        if user_id:
+            user_settings = get_user_settings(user_id) or {}
+            if 'social_cookies' not in user_settings:
+                user_settings['social_cookies'] = {}
+            user_settings['social_cookies'][login_sess.platform] = login_sess.cookies
+            save_user_settings(user_id, user_settings)
+        _login_sessions.pop(session_id, None)
+    return jsonify(resp)
+
+
+@app.route('/api/social/connect/<session_id>/cancel', methods=['POST'])
+@login_required
+def api_social_connect_cancel(session_id):
+    from src.social_extractor import _login_sessions
+    login_sess = _login_sessions.pop(session_id, None)
+    if login_sess:
+        login_sess.cancel()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/social/disconnect/<platform>', methods=['POST'])
+@login_required
+def api_social_disconnect(platform):
+    """Remove stored session cookies for a platform. Bypasses settings tier filter."""
+    from src.auth_db import get_user_settings, save_user_settings
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({'error': 'not authenticated'}), 401
+    user_settings = get_user_settings(user_id) or {}
+    if 'social_cookies' in user_settings:
+        user_settings['social_cookies'].pop(platform, None)
+    save_user_settings(user_id, user_settings)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/social/credentials', methods=['POST'])
+@login_required
+def api_social_credentials():
+    """Save login credentials for a platform. Bypasses settings tier filter."""
+    from src.auth_db import get_user_settings, save_user_settings
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({'error': 'not authenticated'}), 401
+    body = request.get_json() or {}
+    platform = body.get('platform', '').lower()
+    username = body.get('username', '')
+    password = body.get('password', '')
+    if not platform:
+        return jsonify({'error': 'platform is required'}), 400
+    user_settings = get_user_settings(user_id) or {}
+    if 'social_credentials' not in user_settings:
+        user_settings['social_credentials'] = {}
+    user_settings['social_credentials'][platform] = {'username': username, 'password': password}
+    save_user_settings(user_id, user_settings)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/social/fetch-profile', methods=['POST'])
+@login_required
+def api_social_fetch_profile():
+    """Fetch profile data for a single platform URL, with 30-min in-process cache."""
+    import time as _time
+    from src.auth_db import get_user_settings
+    from src.social_extractor import fetch_social_profile, _social_profile_cache as _spc
+    user_id = session.get('user_id')
+    body = request.get_json() or {}
+    platform = body.get('platform', '').lower()
+    url = body.get('url', '').strip()
+    force = body.get('force', False)
+    if not platform or not url:
+        return jsonify({'error': 'platform and url required'}), 400
+
+    cache_key = (url, platform)
+    now = _time.time()
+    if not force and cache_key in _spc:
+        entry = _spc[cache_key]
+        if entry['expires'] > now:
+            return jsonify({'data': entry['data'], 'cached': True})
+
+    user_settings = get_user_settings(user_id) or {}
+    cookies_for_platform = user_settings.get('social_cookies', {}).get(platform)
+    try:
+        data = fetch_social_profile(url, platform, cookies=cookies_for_platform)
+        _spc[cache_key] = {'data': data, 'expires': now + 1800}
+        return jsonify({'data': data, 'cached': False})
+    except Exception as e:
+        logger.error(f'fetch-profile failed: {e}')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/social/test', methods=['POST'])
+@login_required
+def api_social_test():
+    """Fetch a social profile URL with stored session cookies and return parsed data."""
+    from src.auth_db import get_user_settings
+    from src.social_extractor import fetch_social_profile
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({'error': 'not authenticated'}), 401
+    body = request.get_json() or {}
+    platform = body.get('platform', '').lower()
+    url = body.get('url', '').strip()
+    if not platform or not url:
+        return jsonify({'error': 'platform and url required'}), 400
+    user_settings = get_user_settings(user_id) or {}
+    cookies_for_platform = user_settings.get('social_cookies', {}).get(platform)
+    try:
+        profile = fetch_social_profile(url, platform, cookies=cookies_for_platform)
+        return jsonify({'profile': profile})
+    except Exception as e:
+        logger.error(f'social test failed: {e}')
+        return jsonify({'error': str(e)}), 500
+
+
+# ── Directory Verification & Registration ─────────────────────────────
+
+@app.route('/api/directory/list', methods=['GET'])
+@login_required
+def api_directory_list():
+    """List all available directory playbooks."""
+    from src.directory_registry import list_directories
+    return jsonify({'directories': list_directories()})
+
+
+@app.route('/api/directory/verify', methods=['POST'])
+@login_required
+def api_directory_verify():
+    """Batch-verify business presence across directories."""
+    from src.directory_checker import DirectoryVerifier
+
+    body = request.get_json() or {}
+    business_name = body.get('business_name')
+    location = body.get('location')
+
+    if not business_name or not location:
+        return jsonify({'error': 'business_name and location are required'}), 400
+
+    verifier = DirectoryVerifier(
+        max_concurrent=body.get('max_concurrent', 3),
+        timeout_per_directory=body.get('timeout_per_directory', 30)
+    )
+
+    loop = asyncio.new_event_loop()
+    try:
+        result = loop.run_until_complete(
+            verifier.verify(
+                business_name=business_name,
+                location=location,
+                phone=body.get('phone'),
+                address=body.get('address'),
+                website=body.get('website'),
+                directories=body.get('directories'),
+            )
+        )
+    finally:
+        loop.close()
+
+    return jsonify(result)
+
+
+@app.route('/api/directory/register/start', methods=['POST'])
+@login_required
+def api_directory_register_start():
+    """Start an interactive registration session for one directory."""
+    from src.directory_checker import DirectoryRegistrationSession, _registration_sessions
+
+    body = request.get_json() or {}
+    directory_key = body.get('directory')
+    nap = body.get('nap', {})
+
+    if not directory_key:
+        return jsonify({'error': 'directory is required'}), 400
+    if not nap.get('name'):
+        return jsonify({'error': 'nap.name is required'}), 400
+
+    session_id = str(uuid.uuid4())
+    reg_session = DirectoryRegistrationSession(session_id, directory_key, nap)
+    _registration_sessions[session_id] = reg_session
+
+    return jsonify({'session_id': session_id, 'directory': directory_key})
+
+
+@app.route('/api/directory/register/<session_id>/screenshot', methods=['GET'])
+@login_required
+def api_directory_register_screenshot(session_id):
+    """Get current screenshot of registration session."""
+    from src.directory_checker import _registration_sessions
+    from flask import Response
+
+    reg_session = _registration_sessions.get(session_id)
+    if not reg_session:
+        return jsonify({'error': 'session not found'}), 404
+    if reg_session.screenshot:
+        return Response(reg_session.screenshot, mimetype='image/jpeg')
+    return jsonify({'error': 'no screenshot yet'}), 204
+
+
+@app.route('/api/directory/register/<session_id>/interact', methods=['POST'])
+@login_required
+def api_directory_register_interact(session_id):
+    """Relay user actions (click, type, key, scroll) to registration session."""
+    from src.directory_checker import _registration_sessions
+
+    reg_session = _registration_sessions.get(session_id)
+    if not reg_session:
+        return jsonify({'error': 'session not found'}), 404
+    action = request.get_json() or {}
+    reg_session.push_action(action)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/directory/register/<session_id>/submit', methods=['POST'])
+@login_required
+def api_directory_register_submit(session_id):
+    """Request form submission in the registration session."""
+    from src.directory_checker import _registration_sessions
+
+    reg_session = _registration_sessions.get(session_id)
+    if not reg_session:
+        return jsonify({'error': 'session not found'}), 404
+    if reg_session.status != 'awaiting_review':
+        return jsonify({'error': f'Cannot submit in status: {reg_session.status}'}), 400
+    reg_session.request_submit()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/directory/register/<session_id>/status', methods=['GET'])
+@login_required
+def api_directory_register_status(session_id):
+    """Get current status of registration session."""
+    from src.directory_checker import _registration_sessions
+
+    reg_session = _registration_sessions.get(session_id)
+    if not reg_session:
+        return jsonify({'error': 'session not found'}), 404
+
+    resp = {
+        'status': reg_session.status,
+        'directory': reg_session.directory_key,
+        'session_id': session_id,
+    }
+    if reg_session.error:
+        resp['error'] = reg_session.error
+
+    # Clean up completed/failed sessions
+    if reg_session.status in ('submitted', 'failed', 'cancelled'):
+        _registration_sessions.pop(session_id, None)
+
+    return jsonify(resp)
+
+
+@app.route('/api/directory/register/<session_id>/cancel', methods=['POST'])
+@login_required
+def api_directory_register_cancel(session_id):
+    """Cancel a registration session."""
+    from src.directory_checker import _registration_sessions
+
+    reg_session = _registration_sessions.pop(session_id, None)
+    if reg_session:
+        reg_session.cancel()
+    return jsonify({'ok': True})
 
 
 @app.route('/api/export_data', methods=['POST'])
@@ -1879,16 +2230,13 @@ def _cleanup_research_jobs():
 
 def _get_local_user_id():
     """Get the local admin user ID for API requests (creates user if needed)."""
-    import sqlite3
+    from src.db import get_db, get_cursor, ph
     try:
-        db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'users.db')
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute('SELECT id FROM users WHERE username = ?', ('local',))
-        user = cursor.fetchone()
-        conn.close()
-        return user['id'] if user else None
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            cursor.execute(f'SELECT id FROM users WHERE username = {ph()}', ('local',))
+            user = cursor.fetchone()
+            return user['id'] if user else None
     except Exception:
         return None
 
@@ -2528,6 +2876,90 @@ def api_keys_delete(key_id):
     if revoke_api_key(key_id, user_id):
         return jsonify({'success': True})
     return jsonify({'error': 'Key not found or already revoked'}), 404
+
+
+# ── SEO Audit Results API ──────────────────────────────────────
+
+@app.route('/api/audit-results/<int:crawl_id>', methods=['POST'])
+@api_auth_required
+def audit_results_push(crawl_id):
+    """Push AI-generated audit-data.json for a crawl."""
+    from src.crawl_db import get_crawl_by_id, save_audit_result
+
+    crawl = get_crawl_by_id(crawl_id)
+    if not crawl:
+        return jsonify({'error': 'Crawl not found'}), 404
+
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Request body must be JSON'}), 400
+
+    summary = data.get('summary', {})
+    domain = crawl.get('base_domain') or ''
+    if not domain and data.get('site_url'):
+        from urllib.parse import urlparse
+        domain = urlparse(data['site_url']).netloc
+
+    audit_id = save_audit_result(
+        crawl_id=crawl_id,
+        domain=domain,
+        client_name=data.get('client_name', ''),
+        business_context=data.get('business_context', {}),
+        audit_data=data,
+        summary=summary
+    )
+
+    if audit_id:
+        return jsonify({'success': True, 'audit_id': audit_id, 'crawl_id': crawl_id}), 201
+    return jsonify({'error': 'Failed to save audit result'}), 500
+
+
+@app.route('/api/audit-results/<int:crawl_id>', methods=['GET'])
+@api_auth_required
+def audit_results_get(crawl_id):
+    """Get the latest audit result for a crawl."""
+    from src.crawl_db import get_audit_result
+
+    version = request.args.get('version', type=int)
+    audit = get_audit_result(crawl_id, version=version)
+
+    return jsonify({'success': True, 'audit': audit})
+
+
+@app.route('/api/audit-results/domain/<path:domain>', methods=['GET'])
+@api_auth_required
+def audit_results_by_domain(domain):
+    """Get the latest audit result for a domain."""
+    from src.crawl_db import get_latest_audit_by_domain
+
+    audit = get_latest_audit_by_domain(domain)
+    return jsonify({'success': True, 'audit': audit})
+
+
+@app.route('/api/audit-results/<int:audit_id>/progress', methods=['PUT'])
+@api_auth_required
+def audit_results_progress(audit_id):
+    """Save checkbox/progress state for an audit."""
+    from src.crawl_db import update_audit_progress
+
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Request body must be JSON'}), 400
+
+    if update_audit_progress(audit_id, data):
+        return jsonify({'success': True})
+    return jsonify({'error': 'Failed to update progress'}), 500
+
+
+@app.route('/api/audit-results/list', methods=['GET'])
+@api_auth_required
+def audit_results_list():
+    """List all audit results (summaries only)."""
+    from src.crawl_db import list_audits
+
+    limit = request.args.get('limit', 50, type=int)
+    audits = list_audits(limit=limit)
+    return jsonify({'success': True, 'audits': audits})
 
 
 # ============================================================

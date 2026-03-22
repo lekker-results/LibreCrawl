@@ -38,7 +38,15 @@ function initVisualization() {
     cy = cytoscape({
         container: container,
         elements: [],
-        style: [
+        style: (function() {
+            // Read CSS variables for Cytoscape (which doesn't support var() natively)
+            const cs = getComputedStyle(document.documentElement);
+            const v = (name) => cs.getPropertyValue(name).trim() || undefined;
+            const textBody = v('--text-body') || '#e5e7eb';
+            const bgCard = v('--bg-card') || '#1f2937';
+            const border = v('--border-standard') || '#374151';
+            const accent = v('--accent-2') || '#8b5cf6';
+            return [
             {
                 selector: 'node',
                 style: {
@@ -47,21 +55,21 @@ function initVisualization() {
                     'width': 'data(size)',
                     'height': 'data(size)',
                     'font-size': '12px',
-                    'color': '#e5e7eb',
-                    'text-outline-color': '#1f2937',
+                    'color': textBody,
+                    'text-outline-color': bgCard,
                     'text-outline-width': 2,
                     'text-valign': 'bottom',
                     'text-halign': 'center',
                     'text-margin-y': 5,
                     'overlay-opacity': 0,
                     'border-width': 2,
-                    'border-color': '#374151'
+                    'border-color': border
                 }
             },
             {
                 selector: 'node:selected',
                 style: {
-                    'border-color': '#8b5cf6',
+                    'border-color': accent,
                     'border-width': 3,
                     'overlay-opacity': 0
                 }
@@ -70,8 +78,8 @@ function initVisualization() {
                 selector: 'edge',
                 style: {
                     'width': 2,
-                    'line-color': '#4b5563',
-                    'target-arrow-color': '#4b5563',
+                    'line-color': border,
+                    'target-arrow-color': border,
                     'target-arrow-shape': 'triangle',
                     'curve-style': 'bezier',
                     'arrow-scale': 1,
@@ -81,13 +89,13 @@ function initVisualization() {
             {
                 selector: 'edge:selected',
                 style: {
-                    'line-color': '#8b5cf6',
-                    'target-arrow-color': '#8b5cf6',
+                    'line-color': accent,
+                    'target-arrow-color': accent,
                     'width': 3,
                     'opacity': 1
                 }
             }
-        ],
+        ];})(),
         layout: {
             name: 'preset'  // Use preset (no auto-layout on init)
         },
@@ -369,7 +377,7 @@ function exportVisualizationImage() {
 
     const png = cy.png({
         output: 'blob',
-        bg: '#1a1d29',
+        bg: getComputedStyle(document.documentElement).getPropertyValue('--bg-base').trim() || '#1a1d29',
         full: true,
         scale: 2
     });
@@ -449,7 +457,8 @@ function updateVisualizationFromLoadedData(urls, links) {
         const status_code = page.status_code || 0;
 
         // Assign color based on status code
-        let color = '#6b7280';
+        // Status colors are intentionally fixed (semantic) — they work in both themes
+        let color = getComputedStyle(document.documentElement).getPropertyValue('--text-dim').trim() || '#6b7280';
         if (status_code >= 200 && status_code < 300) color = '#10b981';
         else if (status_code >= 300 && status_code < 400) color = '#3b82f6';
         else if (status_code >= 400 && status_code < 500) color = '#f59e0b';

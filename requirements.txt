@@ -10,3 +10,5 @@ psutil
 bcrypt==4.1.2
 markdown
 python-dotenv
+rapidfuzz>=3.0.0
+psycopg2-binary>=2.9.0

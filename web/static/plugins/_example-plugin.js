@@ -116,17 +116,17 @@ LibreCrawlPlugin.register({
         container.innerHTML = `
             <div class="plugin-content" style="padding: 20px; overflow-y: auto; max-height: calc(100vh - 280px);">
                 <div class="plugin-header" style="margin-bottom: 24px;">
-                    <h2 style="font-size: 24px; font-weight: 700; color: #e5e7eb;">
+                    <h2 style="font-size: 24px; font-weight: 700; color: var(--text-body);">
                         🔥 Example Analysis
                     </h2>
-                    <p style="color: #9ca3af; font-size: 14px;">
+                    <p style="color: var(--text-dim); font-size: 14px;">
                         This is an example plugin showing the basic structure
                     </p>
                 </div>
 
-                <div style="background: #1f2937; padding: 20px; border-radius: 12px; border: 1px solid #374151;">
-                    <h3 style="color: #e5e7eb; margin-bottom: 16px;">Summary</h3>
-                    <div style="color: #cbd5e1;">
+                <div style="background: var(--bg-card); padding: 20px; border-radius: 12px; border: 1px solid var(--border-standard);">
+                    <h3 style="color: var(--text-body); margin-bottom: 16px;">Summary</h3>
+                    <div style="color: var(--text-secondary);">
                         <p>Total URLs: ${data.urls.length}</p>
                         <p>Total Links: ${data.links ? data.links.length : 0}</p>
                         <p>Total Issues: ${data.issues ? data.issues.length : 0}</p>
@@ -134,8 +134,8 @@ LibreCrawlPlugin.register({
                     </div>
                 </div>
 
-                <div style="margin-top: 20px; background: #1f2937; padding: 20px; border-radius: 12px; border: 1px solid #374151;">
-                    <h3 style="color: #e5e7eb; margin-bottom: 16px;">URL List</h3>
+                <div style="margin-top: 20px; background: var(--bg-card); padding: 20px; border-radius: 12px; border: 1px solid var(--border-standard);">
+                    <h3 style="color: var(--text-body); margin-bottom: 16px;">URL List</h3>
                     <div style="max-height: 400px; overflow-y: auto;">
                         ${this.renderUrlList(data.urls)}
                     </div>
@@ -173,11 +173,11 @@ LibreCrawlPlugin.register({
      */
     renderUrlList(urls) {
         return urls.slice(0, 20).map(url => `
-            <div style="padding: 12px; border-bottom: 1px solid #374151; color: #cbd5e1; font-size: 13px;">
+            <div style="padding: 12px; border-bottom: 1px solid var(--border-standard); color: var(--text-secondary); font-size: 13px;">
                 <div style="font-weight: 600; margin-bottom: 4px;">
                     ${this.utils.escapeHtml(url.url)}
                 </div>
-                <div style="color: #9ca3af; font-size: 12px;">
+                <div style="color: var(--text-dim); font-size: 12px;">
                     Status: ${url.status_code} | Title: ${this.utils.escapeHtml(url.title || 'N/A')}
                 </div>
             </div>
@@ -193,10 +193,10 @@ LibreCrawlPlugin.register({
             <div style="padding: 20px; overflow-y: auto; max-height: calc(100vh - 280px);">
                 <div style="text-align: center; padding: 60px 20px;">
                     <div style="font-size: 64px; margin-bottom: 20px;">🔥</div>
-                    <h3 style="font-size: 24px; color: #e5e7eb; margin-bottom: 12px;">
+                    <h3 style="font-size: 24px; color: var(--text-body); margin-bottom: 12px;">
                         No Data Yet
                     </h3>
-                    <p style="color: #9ca3af; font-size: 14px;">
+                    <p style="color: var(--text-dim); font-size: 14px;">
                         Start crawling to see your analysis here
                     </p>
                 </div>

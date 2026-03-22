@@ -49,6 +49,8 @@ class PluginLoader {
             'seo-keywords.js',
             'seo-images.js',
             'gbp-profile.js',
+            'social-profiles.js',
+            'seo-audit.js',
             // 'content-quality.js',
         ];
 
@@ -238,8 +240,9 @@ class PluginLoader {
         tabBtn.className = 'tab-btn';
         tabBtn.setAttribute('data-plugin-id', plugin.id);
 
-        const icon = plugin.tab.icon ? `${plugin.tab.icon} ` : '';
-        tabBtn.textContent = `${icon}${plugin.tab.label}`;
+        const icon = plugin.tab.icon || '';
+        tabBtn.innerHTML = `<span class="tab-icon">${icon}</span><span class="tab-label">${plugin.tab.label}</span>`;
+        tabBtn.setAttribute('data-tooltip', plugin.tab.label);
 
         tabBtn.onclick = () => {
             if (typeof window.switchTab === 'function') {
@@ -247,14 +250,21 @@ class PluginLoader {
             }
         };
 
-        // Insert tab button at appropriate position
+        // Insert tab button at appropriate position (before the collapse button if present)
+        const collapseBtn = tabHeader.querySelector('.collapse-sidebar-btn');
         if (plugin.tab.position === 'end' || typeof plugin.tab.position !== 'number') {
-            tabHeader.appendChild(tabBtn);
+            if (collapseBtn) {
+                tabHeader.insertBefore(tabBtn, collapseBtn);
+            } else {
+                tabHeader.appendChild(tabBtn);
+            }
         } else {
-            const children = Array.from(tabHeader.children);
+            const children = Array.from(tabHeader.querySelectorAll('.tab-btn'));
             const insertBefore = children[plugin.tab.position];
             if (insertBefore) {
                 tabHeader.insertBefore(tabBtn, insertBefore);
+            } else if (collapseBtn) {
+                tabHeader.insertBefore(tabBtn, collapseBtn);
             } else {
                 tabHeader.appendChild(tabBtn);
             }

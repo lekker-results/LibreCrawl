@@ -1,17 +1,42 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: librecrawl-db
+    environment:
+      POSTGRES_DB: librecrawl
+      POSTGRES_USER: librecrawl
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-librecrawl}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U librecrawl"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   librecrawl:
     build: .
     container_name: librecrawl
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       # In local mode: only localhost (127.0.0.1:5000)
       # In production mode: all interfaces (0.0.0.0:5000) for LAN/WAN access
       - "${HOST_BINDING:-127.0.0.1}:5000:5000"
     volumes:
-      # Persist the user database and settings
+      # Persist SQLite fallback data (used when DATABASE_URL is not set)
       - ./data:/app/data
+      # Live playbook updates without rebuild
+      - ./src/playbooks:/app/src/playbooks
     environment:
       - FLASK_APP=main.py
       - PYTHONUNBUFFERED=1
+      # PostgreSQL connection (uses Postgres container by default; set to Supabase/Neon URL to use cloud DB)
+      - DATABASE_URL=${DATABASE_URL:-postgresql://librecrawl:${POSTGRES_PASSWORD:-librecrawl}@postgres:5432/librecrawl}
       # Set to "true" for local mode (no authentication), "false" for production
       - LOCAL_MODE=${LOCAL_MODE:-true}
       # Set to "true" to disable new user registrations
@@ -42,3 +67,5 @@ services:
     # Increase shared memory size for Chrome to prevent crashes
     shm_size: '2gb'
 
+volumes:
+  pgdata:

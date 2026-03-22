@@ -7,6 +7,7 @@ import threading
 import time
 import asyncio
 import re
+import fnmatch
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
@@ -303,12 +304,19 @@ class WebCrawler:
             'start_time': time.time()
         }
 
+        # Track which URLs came from the sitemap
+        self.sitemap_urls = set()
+
         # Start memory monitoring
         self.memory_monitor.start_monitoring()
 
     def _discover_and_add_sitemap_urls(self, base_url):
         """Discover sitemaps and add URLs to crawl queue"""
         sitemap_urls = self.sitemap_parser.discover_sitemaps(base_url)
+
+        # Store normalized sitemap URLs for tagging pages later
+        for url in sitemap_urls:
+            self.sitemap_urls.add(self.link_manager.normalize_url(url))
 
         added_count = 0
         filtered_count = 0
@@ -870,7 +878,8 @@ class WebCrawler:
                 'redirects': [],
                 'hreflang': [],
                 'schema_org': [],
-                'linked_from': []
+                'linked_from': [],
+                'in_sitemap': self.link_manager.normalize_url(url) in self.sitemap_urls
             }
 
             # Only parse HTML content
@@ -982,6 +991,7 @@ class WebCrawler:
                 'hreflang': [],
                 'schema_org': [],
                 'linked_from': [],
+                'in_sitemap': self.link_manager.normalize_url(url) in self.sitemap_urls,
                 'javascript_rendered': True
             }
 
@@ -1159,6 +1169,20 @@ class WebCrawler:
         if self.config['respect_robots']:
             if not self._check_robots_txt(url):
                 return False
+
+        # Skip URLs matching issue exclusion patterns (wp-login, wp-admin, etc.)
+        exclusion_patterns = self.config.get('issue_exclusion_patterns', [])
+        if exclusion_patterns:
+            path = parsed.path
+            for pattern in exclusion_patterns:
+                if not pattern or pattern.startswith('#'):
+                    continue
+                if '*' in pattern:
+                    if fnmatch.fnmatch(path, pattern):
+                        return False
+                else:
+                    if path.rstrip('/') == pattern.rstrip('/'):
+                        return False
 
         # Check file extensions
         path = parsed.path.lower()
