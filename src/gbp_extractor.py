@@ -590,3 +590,92 @@ def build_gbp_report(urls, api_key):
         'branches': final_branches,
         'analyzed_at': datetime.now().isoformat(),
     }
+
+
+def build_gbp_report_from_client_info(business_name, location=None, phone=None,
+                                       domain=None, api_key=None):
+    """Build a GBP report from client info alone, no crawl required.
+
+    Creates a synthetic branch from the provided business details and searches
+    Google Places API, using the same matching logic as build_gbp_report().
+    """
+    if not api_key:
+        return {'error': 'Google Places API key required', 'branches': []}
+
+    if not business_name:
+        return {'error': 'Business name required', 'branches': []}
+
+    # Build a synthetic branch (same shape as extract_business_info output)
+    branch = {
+        'name': business_name,
+        'telephone': phone or '',
+        'email': '',
+        'address': _parse_location_string(location or ''),
+        'url': f'https://{domain}' if domain else '',
+        'source_page': '',
+        'from_structured_data': False,
+    }
+
+    branch_result = {
+        'extracted': branch,
+        'gbp': None,
+        'match_confidence': 0,
+        'search_query': '',
+        'all_candidates': [],
+    }
+
+    # Build search queries
+    city = branch['address'].get('city', '')
+    queries = []
+    if location:
+        queries.append(f'{business_name} {location}')
+    if city and city.lower() != (location or '').lower():
+        queries.append(f'{business_name} {city}')
+    if not queries:
+        queries.append(business_name)
+
+    best_result = None
+    best_score = -1
+
+    for query in queries:
+        branch_result['search_query'] = query
+        search_result = search_google_places(query, api_key)
+        if 'error' in search_result:
+            branch_result['error'] = search_result['error']
+            continue
+
+        places = search_result.get('places', [])
+        if not places:
+            continue
+
+        ranked = match_place_to_branch(places, domain or '', branch)
+        if ranked and ranked[0].get('match_confidence', 0) > best_score:
+            best_score = ranked[0]['match_confidence']
+            best_result = ranked
+            branch_result['search_query'] = query
+            branch_result['error'] = None
+
+        if best_score >= 65:
+            break
+
+    if best_result:
+        branch_result['all_candidates'] = best_result
+        branch_result['gbp'] = best_result[0]
+        branch_result['match_confidence'] = best_result[0].get('match_confidence', 0)
+
+    return {
+        'domain': domain or '',
+        'brand_name': business_name,
+        'branches': [branch_result],
+        'analyzed_at': datetime.now().isoformat(),
+    }
+
+
+def _parse_location_string(location):
+    """Parse a location string like 'Chicago, IL' into an address dict."""
+    parts = [p.strip() for p in location.split(',') if p.strip()]
+    if len(parts) >= 2:
+        return {'city': parts[0], 'region': parts[1], 'street': '', 'postal': ''}
+    elif len(parts) == 1:
+        return {'city': parts[0], 'region': '', 'street': '', 'postal': ''}
+    return {'city': '', 'region': '', 'street': '', 'postal': ''}

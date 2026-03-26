@@ -24,18 +24,20 @@ class RateLimiter:
     def acquire(self):
         """
         Acquire permission to make a request.
-        Blocks until enough time has passed since the last request.
+        Reserves the next available time slot while holding the lock, then
+        sleeps outside the lock so concurrent threads don't serialize on sleep.
         """
         with self.lock:
             now = time.time()
-            time_since_last = now - self.last_request_time
-
-            if time_since_last < self.min_interval:
-                sleep_time = self.min_interval - time_since_last
-                time.sleep(sleep_time)
-                self.last_request_time = time.time()
+            if self.last_request_time + self.min_interval > now:
+                wait_until = self.last_request_time + self.min_interval
             else:
-                self.last_request_time = now
+                wait_until = now
+            self.last_request_time = wait_until
+
+        sleep_time = wait_until - time.time()
+        if sleep_time > 0:
+            time.sleep(sleep_time)
 
     def update_rate(self, requests_per_second):
         """Update the rate limit dynamically"""

@@ -887,6 +887,46 @@ def build_social_report(urls, links, fetch_profiles=False, session_cookies=None)
     }
 
 
+def build_social_report_from_client_info(business_name, domain=None):
+    """Build a social report from client info alone, no crawl required.
+
+    Skips Tier 1 (on-site discovery) and goes straight to Tier 1.5
+    (DuckDuckGo search) for all platforms.
+    """
+    if not business_name:
+        return {
+            'profiles': {},
+            'business_name': '',
+            'summary': {'found_on_site': [], 'found_via_search': [], 'missing': list(SOCIAL_PLATFORMS.keys()), 'has_schema_sameAs': False},
+            'analyzed_at': datetime.utcnow().isoformat() + 'Z',
+        }
+
+    profiles = {}
+    found_via_search = []
+    missing = []
+
+    for platform in SOCIAL_PLATFORMS:
+        search_result = search_for_social_profile(business_name, domain or '', platform)
+        if search_result:
+            profiles[platform] = dict(search_result, data=None)
+            found_via_search.append(platform)
+        else:
+            profiles[platform] = None
+            missing.append(platform)
+
+    return {
+        'profiles': profiles,
+        'business_name': business_name,
+        'summary': {
+            'found_on_site': [],
+            'found_via_search': found_via_search,
+            'missing': missing,
+            'has_schema_sameAs': False,
+        },
+        'analyzed_at': datetime.utcnow().isoformat() + 'Z',
+    }
+
+
 class LoginSession:
     """
     Tier 3: In-browser login automation with screenshot relay.

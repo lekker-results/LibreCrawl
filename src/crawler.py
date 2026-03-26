@@ -202,7 +202,7 @@ class WebCrawler:
             ]
         }
 
-    def start_crawl(self, url, user_id=None, session_id=None):
+    def start_crawl(self, url, user_id=None, session_id=None, client_id=None, crawl_type='standalone', entity_id=None):
         """Start crawling from the given URL"""
         if self.is_running:
             return False, "Crawl already in progress"
@@ -234,7 +234,10 @@ class WebCrawler:
                     session_id=session_id,
                     base_url=self.base_url,
                     base_domain=self.base_domain,
-                    config_snapshot=self.config
+                    config_snapshot=self.config,
+                    client_id=client_id,
+                    crawl_type=crawl_type,
+                    entity_id=entity_id
                 )
                 if self.crawl_id:
                     self.db_save_enabled = True

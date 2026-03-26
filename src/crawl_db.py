@@ -340,9 +340,67 @@ def init_crawl_tables():
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_results_domain ON crawl_audit_results(domain)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_offpage_results_domain ON crawl_offpage_results(domain)')
 
+        # ── Client management tables ─────────────────────────────────
+        cursor.execute(f'''
+            CREATE TABLE IF NOT EXISTS clients (
+                id {serial_pk()},
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                domain TEXT,
+                business_name TEXT,
+                location TEXT,
+                phone TEXT,
+                address TEXT,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        ''')
+        cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_user_name ON clients(user_id, name)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_clients_user ON clients(user_id)')
+
+        cursor.execute(f'''
+            CREATE TABLE IF NOT EXISTS client_entities (
+                id {serial_pk()},
+                client_id INTEGER NOT NULL,
+                domain TEXT NOT NULL,
+                name TEXT,
+                type TEXT NOT NULL DEFAULT 'competitor',
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE
+            )
+        ''')
+        cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_client_domain ON client_entities(client_id, domain)')
+
+        # Migrations: add client_id and crawl_type to existing tables
+        for stmt in [
+            'ALTER TABLE crawls ADD COLUMN client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL',
+            "ALTER TABLE crawls ADD COLUMN crawl_type TEXT DEFAULT 'standalone'",
+            'ALTER TABLE crawl_gbp_data ADD COLUMN client_id INTEGER',
+            'ALTER TABLE crawl_offpage_results ADD COLUMN client_id INTEGER',
+            'ALTER TABLE crawls ADD COLUMN entity_id INTEGER REFERENCES client_entities(id) ON DELETE SET NULL',
+            'ALTER TABLE crawl_offpage_results ADD COLUMN entity_id INTEGER',
+        ]:
+            try:
+                if DB_TYPE == 'postgres':
+                    cursor.execute('SAVEPOINT migration_check')
+                cursor.execute(stmt)
+                if DB_TYPE == 'postgres':
+                    cursor.execute('RELEASE SAVEPOINT migration_check')
+            except Exception:
+                if DB_TYPE == 'postgres':
+                    cursor.execute('ROLLBACK TO SAVEPOINT migration_check')
+                pass  # Column already exists
+
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_crawls_client ON crawls(client_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_crawls_entity ON crawls(entity_id)')
+
         print("Crawl persistence tables initialized successfully")
 
-def create_crawl(user_id, session_id, base_url, base_domain, config_snapshot):
+def create_crawl(user_id, session_id, base_url, base_domain, config_snapshot,
+                  client_id=None, crawl_type='standalone', entity_id=None):
     """
     Create a new crawl record
     Returns the crawl_id
@@ -351,12 +409,12 @@ def create_crawl(user_id, session_id, base_url, base_domain, config_snapshot):
         with get_db() as conn:
             cursor = get_cursor(conn)
             cursor.execute(f'''
-                INSERT INTO crawls (user_id, session_id, base_url, base_domain, config_snapshot, status)
-                VALUES ({ph(5)}, 'running'){returning_id()}
-            ''', (user_id, session_id, base_url, base_domain, json.dumps(config_snapshot)))
+                INSERT INTO crawls (user_id, session_id, base_url, base_domain, config_snapshot, status, client_id, crawl_type, entity_id)
+                VALUES ({ph(9)}){returning_id()}
+            ''', (user_id, session_id, base_url, base_domain, json.dumps(config_snapshot), 'running', client_id, crawl_type, entity_id))
 
             crawl_id = get_last_id(cursor)
-            print(f"Created new crawl record: ID={crawl_id}, URL={base_url}")
+            print(f"Created new crawl record: ID={crawl_id}, URL={base_url}, client_id={client_id}, type={crawl_type}")
             return crawl_id
     except Exception as e:
         print(f"Error creating crawl: {e}")
@@ -624,8 +682,8 @@ def get_crawl_by_id(crawl_id):
         print(f"Error fetching crawl: {e}")
         return None
 
-def get_user_crawls(user_id, limit=50, offset=0, status_filter=None):
-    """Get all crawls for a user"""
+def get_user_crawls(user_id, limit=50, offset=0, status_filter=None, client_id=None):
+    """Get all crawls for a user, optionally filtered by client_id"""
     try:
         with get_db() as conn:
             cursor = get_cursor(conn)
@@ -637,6 +695,10 @@ def get_user_crawls(user_id, limit=50, offset=0, status_filter=None):
             if status_filter:
                 query += f' AND status = {_p}'
                 params.append(status_filter)
+
+            if client_id is not None:
+                query += f' AND client_id = {_p}'
+                params.append(client_id)
 
             query += f' ORDER BY started_at DESC LIMIT {_p} OFFSET {_p}'
             params.extend([limit, offset])
@@ -1160,3 +1222,239 @@ def list_audits(limit=50):
     except Exception as e:
         print(f"Error listing audits: {e}")
         return []
+
+
+# ── Client Management ─────────────────────────────────────────────
+
+def create_client(user_id, name, domain=None, business_name=None,
+                  location=None, phone=None, address=None, notes=None):
+    """Create a new client. Returns client_id or None."""
+    try:
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            cursor.execute(f'''
+                INSERT INTO clients (user_id, name, domain, business_name, location, phone, address, notes)
+                VALUES ({ph(8)}){returning_id()}
+            ''', (user_id, name, domain, business_name, location, phone, address, notes))
+            client_id = get_last_id(cursor)
+            print(f"Created client: id={client_id}, name={name}")
+            return client_id
+    except Exception as e:
+        print(f"Error creating client: {e}")
+        return None
+
+
+def get_user_clients(user_id):
+    """Get all clients for a user with summary stats (crawl count, last crawl)."""
+    try:
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            cursor.execute(f'''
+                SELECT c.*,
+                       COUNT(cr.id) AS crawl_count,
+                       MAX(cr.started_at) AS last_crawl_at
+                FROM clients c
+                LEFT JOIN crawls cr ON cr.client_id = c.id
+                WHERE c.user_id = {ph()}
+                GROUP BY c.id
+                ORDER BY c.name
+            ''', (user_id,))
+            return [dict(row) for row in cursor.fetchall()]
+    except Exception as e:
+        print(f"Error fetching clients: {e}")
+        return []
+
+
+def get_client(client_id, user_id=None):
+    """Get a single client by ID. Optionally verify ownership via user_id."""
+    try:
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            if user_id is not None:
+                cursor.execute(
+                    f'SELECT * FROM clients WHERE id = {ph()} AND user_id = {ph()}',
+                    (client_id, user_id)
+                )
+            else:
+                cursor.execute(f'SELECT * FROM clients WHERE id = {ph()}', (client_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    except Exception as e:
+        print(f"Error fetching client: {e}")
+        return None
+
+
+def update_client(client_id, user_id, **fields):
+    """Update client fields. Only updates provided fields. Returns True on success."""
+    allowed = {'name', 'domain', 'business_name', 'location', 'phone', 'address', 'notes'}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return False
+    try:
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            _p = '%s' if DB_TYPE == 'postgres' else '?'
+            set_clause = ', '.join(f'{k} = {_p}' for k in updates)
+            params = list(updates.values()) + [client_id, user_id]
+            cursor.execute(
+                f'UPDATE clients SET {set_clause}, updated_at = CURRENT_TIMESTAMP WHERE id = {_p} AND user_id = {_p}',
+                params
+            )
+            return cursor.rowcount > 0
+    except Exception as e:
+        print(f"Error updating client: {e}")
+        return False
+
+
+def delete_client(client_id, user_id):
+    """Delete a client. Competitors cascade-delete. Crawls get client_id set to NULL."""
+    try:
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            cursor.execute(
+                f'DELETE FROM clients WHERE id = {ph()} AND user_id = {ph()}',
+                (client_id, user_id)
+            )
+            deleted = cursor.rowcount > 0
+            if deleted:
+                print(f"Deleted client {client_id}")
+            return deleted
+    except Exception as e:
+        print(f"Error deleting client: {e}")
+        return False
+
+
+# ── Entity Management (competitors & branches) ───────────────────
+
+def add_entity(client_id, domain, name=None, entity_type='competitor', notes=None):
+    """Add an entity (competitor or branch) to a client. Returns entity_id or None."""
+    try:
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            cursor.execute(f'''
+                INSERT INTO client_entities (client_id, domain, name, type, notes)
+                VALUES ({ph(5)}){returning_id()}
+            ''', (client_id, domain, name, entity_type, notes))
+            return get_last_id(cursor)
+    except Exception as e:
+        print(f"Error adding entity: {e}")
+        return None
+
+
+def get_client_entities(client_id, entity_type=None):
+    """Get all entities for a client, optionally filtered by type, with latest crawl info."""
+    try:
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            if entity_type:
+                cursor.execute(
+                    f'SELECT * FROM client_entities WHERE client_id = {ph()} AND type = {ph()} ORDER BY domain',
+                    (client_id, entity_type)
+                )
+            else:
+                cursor.execute(
+                    f'SELECT * FROM client_entities WHERE client_id = {ph()} ORDER BY domain',
+                    (client_id,)
+                )
+            entities = [dict(row) for row in cursor.fetchall()]
+            for ent in entities:
+                cursor.execute(f'''
+                    SELECT id, urls_crawled, started_at, status FROM crawls
+                    WHERE entity_id = {ph()}
+                    ORDER BY started_at DESC
+                ''', (ent['id'],))
+                ent['crawls'] = [dict(r) for r in cursor.fetchall()]
+                latest = ent['crawls'][0] if ent['crawls'] else None
+                ent['latest_urls_crawled'] = latest['urls_crawled'] if latest else None
+                ent['latest_crawl_at'] = latest['started_at'] if latest else None
+                ent['latest_crawl_id'] = latest['id'] if latest else None
+            return entities
+    except Exception as e:
+        print(f"Error fetching entities: {e}")
+        return []
+
+
+def delete_entity(entity_id, client_id):
+    """Delete an entity from a client."""
+    try:
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            cursor.execute(
+                f'DELETE FROM client_entities WHERE id = {ph()} AND client_id = {ph()}',
+                (entity_id, client_id)
+            )
+            return cursor.rowcount > 0
+    except Exception as e:
+        print(f"Error deleting entity: {e}")
+        return False
+
+
+# ── Client-scoped queries ──────────────────────────────────────────
+
+def get_client_crawls(client_id):
+    """Get all crawls for a client, grouped by crawl_type."""
+    try:
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            cursor.execute(f'''
+                SELECT id, base_url, base_domain, status, crawl_type, entity_id,
+                       urls_crawled, urls_discovered, started_at, completed_at
+                FROM crawls
+                WHERE client_id = {ph()}
+                ORDER BY started_at DESC
+            ''', (client_id,))
+            crawls = [dict(row) for row in cursor.fetchall()]
+            return {
+                'client': [c for c in crawls if c.get('crawl_type') == 'client'],
+                'competitor': [c for c in crawls if c.get('crawl_type') == 'competitor'],
+                'branch': [c for c in crawls if c.get('crawl_type') == 'branch'],
+                'all': crawls,
+            }
+    except Exception as e:
+        print(f"Error fetching client crawls: {e}")
+        return {'client': [], 'competitor': [], 'branch': [], 'all': []}
+
+
+def get_client_offpage(client_id, category=None):
+    """Get off-page data for a client, optionally filtered by category."""
+    try:
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            _p = '%s' if DB_TYPE == 'postgres' else '?'
+            query = f'SELECT * FROM crawl_offpage_results WHERE client_id = {_p}'
+            params = [client_id]
+            if category:
+                query += f' AND category = {_p}'
+                params.append(category)
+            query += ' ORDER BY created_at DESC'
+            cursor.execute(query, params)
+            results = []
+            for row in cursor.fetchall():
+                r = dict(row)
+                if r.get('data_json'):
+                    r['data'] = json.loads(r['data_json'])
+                results.append(r)
+            return results
+    except Exception as e:
+        print(f"Error fetching client offpage data: {e}")
+        return []
+
+
+def save_client_offpage(client_id, domain, category, data):
+    """Save off-page data for a client. Replaces previous data for same client+category."""
+    try:
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            # Delete previous entry for this client+category
+            cursor.execute(
+                f'DELETE FROM crawl_offpage_results WHERE client_id = {ph()} AND category = {ph()}',
+                (client_id, category)
+            )
+            cursor.execute(f'''
+                INSERT INTO crawl_offpage_results (domain, client_id, category, data_json)
+                VALUES ({ph(4)})
+            ''', (domain or '', client_id, category, json.dumps(data)))
+            return True
+    except Exception as e:
+        print(f"Error saving client offpage data: {e}")
+        return False

@@ -147,6 +147,62 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+def _get_local_user_id():
+    """Get the local admin user ID for API requests (creates user if needed)."""
+    from src.db import get_db, get_cursor, ph
+    try:
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            cursor.execute(f'SELECT id FROM users WHERE username = {ph()}', ('local',))
+            user = cursor.fetchone()
+            return user['id'] if user else None
+    except Exception:
+        return None
+
+def _get_api_user_id():
+    """Resolve user_id for API requests from any auth method."""
+    # From Bearer token auth
+    if hasattr(request, '_api_user_id'):
+        return request._api_user_id
+    # From session
+    if session.get('user_id'):
+        return session['user_id']
+    # In local mode, get the local user
+    if LOCAL_MODE:
+        return _get_local_user_id()
+    return None
+
+def api_auth_required(f):
+    """Auth decorator for programmatic API access.
+    In LOCAL_MODE: accepts X-Local-Auth header (no session needed).
+    Otherwise: requires Authorization: Bearer <api_key> header.
+    Falls back to session auth."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # Check X-Local-Auth header in local mode
+        if LOCAL_MODE and request.headers.get('X-Local-Auth', '').lower() == 'true':
+            return f(*args, **kwargs)
+
+        # Check Bearer token
+        auth_header = request.headers.get('Authorization', '')
+        if auth_header.startswith('Bearer '):
+            api_key = auth_header[7:]
+            user_id, tier = validate_api_key(api_key)
+            if user_id:
+                request._api_user_id = user_id
+                request._api_tier = tier
+                return f(*args, **kwargs)
+            return jsonify({'error': 'Invalid API key'}), 401
+
+        # Fall back to session auth
+        if LOCAL_MODE and 'user_id' not in session:
+            auto_login_local_mode()
+        if 'user_id' in session:
+            return f(*args, **kwargs)
+
+        return jsonify({'error': 'Authentication required. Use X-Local-Auth: true (local mode) or Authorization: Bearer <key>'}), 401
+    return decorated_function
+
 # Multi-tenant crawler instances
 crawler_instances = {}  # session_id -> {'crawler': WebCrawler, 'settings': SettingsManager, 'last_accessed': datetime}
 instances_lock = threading.Lock()
@@ -666,7 +722,19 @@ def start_crawl():
         print(f"Warning: Could not apply settings: {e}")
 
     # Pass user_id and session_id for database persistence
-    success, message = crawler.start_crawl(url, user_id=user_id, session_id=session_id)
+    client_id = data.get('client_id')
+    entity_id = data.get('entity_id')
+    crawl_type = data.get('crawl_type')
+    if not crawl_type:
+        if entity_id:
+            crawl_type = 'competitor'
+        elif client_id:
+            crawl_type = 'client'
+        else:
+            crawl_type = 'standalone'
+    success, message = crawler.start_crawl(url, user_id=user_id, session_id=session_id,
+                                           client_id=client_id, crawl_type=crawl_type,
+                                           entity_id=entity_id)
 
     # Store crawl_id in session
     if success and crawler.crawl_id:
@@ -984,7 +1052,8 @@ def list_crawls():
         offset = request.args.get('offset', 0, type=int)
         status_filter = request.args.get('status')
 
-        crawls = get_user_crawls(user_id, limit=limit, offset=offset, status_filter=status_filter)
+        client_id_filter = request.args.get('client_id', type=int)
+        crawls = get_user_crawls(user_id, limit=limit, offset=offset, status_filter=status_filter, client_id=client_id_filter)
         total_count = get_crawl_count(user_id)
 
         return jsonify({
@@ -1190,6 +1259,431 @@ def crawl_stats():
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
+
+# ── Client Management API ──────────────────────────────────────────
+
+@app.route('/api/clients', methods=['GET'])
+@api_auth_required
+def list_clients():
+    """List all clients for the current user"""
+    try:
+        user_id = _get_api_user_id()
+        from src.crawl_db import get_user_clients
+        clients = get_user_clients(user_id)
+        return jsonify({'success': True, 'clients': clients})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/clients', methods=['POST'])
+@api_auth_required
+def create_client_endpoint():
+    """Create a new client"""
+    try:
+        user_id = _get_api_user_id()
+        data = request.get_json()
+        name = (data.get('name') or '').strip()
+        if not name:
+            return jsonify({'success': False, 'error': 'Client name is required'}), 400
+
+        from src.crawl_db import create_client
+        client_id = create_client(
+            user_id=user_id,
+            name=name,
+            domain=(data.get('domain') or '').strip() or None,
+            business_name=(data.get('business_name') or '').strip() or None,
+            location=(data.get('location') or '').strip() or None,
+            phone=(data.get('phone') or '').strip() or None,
+            address=(data.get('address') or '').strip() or None,
+            notes=(data.get('notes') or '').strip() or None,
+        )
+        if client_id:
+            return jsonify({'success': True, 'client_id': client_id})
+        return jsonify({'success': False, 'error': 'Failed to create client (name may already exist)'}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/clients/<int:client_id>', methods=['GET'])
+@api_auth_required
+def get_client_endpoint(client_id):
+    """Get a single client with details"""
+    try:
+        user_id = _get_api_user_id()
+        from src.crawl_db import get_client, get_client_crawls, get_client_entities, get_client_offpage
+        client = get_client(client_id, user_id)
+        if not client:
+            return jsonify({'success': False, 'error': 'Client not found'}), 404
+        crawls = get_client_crawls(client_id)
+        entities = get_client_entities(client_id)
+        offpage = get_client_offpage(client_id)
+        return jsonify({
+            'success': True,
+            'client': client,
+            'crawls': crawls,
+            'entities': entities,
+            'offpage': offpage,
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/clients/<int:client_id>', methods=['PUT'])
+@api_auth_required
+def update_client_endpoint(client_id):
+    """Update a client"""
+    try:
+        user_id = _get_api_user_id()
+        data = request.get_json()
+        from src.crawl_db import update_client
+        success = update_client(client_id, user_id, **data)
+        if success:
+            return jsonify({'success': True})
+        return jsonify({'success': False, 'error': 'Client not found or no changes made'}), 404
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/clients/<int:client_id>', methods=['DELETE'])
+@api_auth_required
+def delete_client_endpoint(client_id):
+    """Delete a client"""
+    try:
+        user_id = _get_api_user_id()
+        from src.crawl_db import delete_client
+        success = delete_client(client_id, user_id)
+        if success:
+            return jsonify({'success': True})
+        return jsonify({'success': False, 'error': 'Client not found'}), 404
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+# ── Entity Management API (competitors & branches) ────────────────
+
+@app.route('/api/clients/<int:client_id>/entities', methods=['GET'])
+@api_auth_required
+def list_entities(client_id):
+    """List entities for a client, optionally filtered by ?type=competitor|branch"""
+    try:
+        user_id = _get_api_user_id()
+        from src.crawl_db import get_client, get_client_entities
+        client = get_client(client_id, user_id)
+        if not client:
+            return jsonify({'success': False, 'error': 'Client not found'}), 404
+        entity_type = request.args.get('type')
+        entities = get_client_entities(client_id, entity_type=entity_type)
+        return jsonify({'success': True, 'entities': entities})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/clients/<int:client_id>/entities', methods=['POST'])
+@api_auth_required
+def add_entity_endpoint(client_id):
+    """Add an entity (competitor or branch) to a client"""
+    try:
+        user_id = _get_api_user_id()
+        data = request.get_json()
+        domain = (data.get('domain') or '').strip()
+        if not domain:
+            return jsonify({'success': False, 'error': 'Entity domain is required'}), 400
+
+        from src.crawl_db import get_client, add_entity
+        client = get_client(client_id, user_id)
+        if not client:
+            return jsonify({'success': False, 'error': 'Client not found'}), 404
+
+        entity_id = add_entity(
+            client_id=client_id,
+            domain=domain,
+            name=(data.get('name') or '').strip() or None,
+            entity_type=(data.get('type') or 'competitor').strip(),
+            notes=(data.get('notes') or '').strip() or None,
+        )
+        if entity_id:
+            return jsonify({'success': True, 'entity_id': entity_id})
+        return jsonify({'success': False, 'error': 'Failed to add entity (domain may already exist for this client)'}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/clients/<int:client_id>/entities/<int:entity_id>', methods=['DELETE'])
+@api_auth_required
+def delete_entity_endpoint(client_id, entity_id):
+    """Remove an entity from a client"""
+    try:
+        user_id = _get_api_user_id()
+        from src.crawl_db import get_client, delete_entity
+        client = get_client(client_id, user_id)
+        if not client:
+            return jsonify({'success': False, 'error': 'Client not found'}), 404
+        success = delete_entity(entity_id, client_id)
+        if success:
+            return jsonify({'success': True})
+        return jsonify({'success': False, 'error': 'Entity not found'}), 404
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+# ── Demo Seed Data ────────────────────────────────────────────────
+
+@app.route('/api/seed-demo-data', methods=['POST'])
+@api_auth_required
+def seed_demo_data():
+    """Generate demo client with dummy crawl data for testing"""
+    import uuid, random
+    user_id = _get_api_user_id()
+
+    from src.crawl_db import (
+        create_client, add_entity, create_crawl,
+        save_url_batch, save_links_batch, save_issues_batch,
+        set_crawl_status, update_crawl_stats, get_user_clients
+    )
+
+    # Check if Acme Corp already exists
+    existing = get_user_clients(user_id)
+    if any(c['name'] == 'Acme Corp' for c in existing):
+        return jsonify({'success': False, 'error': 'Acme Corp demo client already exists'}), 400
+
+    # Create client
+    client_id = create_client(
+        user_id=user_id, name='Acme Corp', domain='acmecorp.com',
+        business_name='Acme Corporation', location='Chicago, IL',
+        phone='+1 312-555-0100', address='123 Main Street, Chicago, IL 60601',
+        notes='Demo client generated for testing'
+    )
+    if not client_id:
+        return jsonify({'success': False, 'error': 'Failed to create demo client'}), 500
+
+    # Create entities (competitors)
+    ent1_id = add_entity(client_id, 'rival.com', 'Rival Inc', entity_type='competitor')
+    ent2_id = add_entity(client_id, 'competitor-inc.com', 'Competitor Inc', entity_type='competitor')
+
+    # Generate crawl data for each entity
+    entities = [
+        {'domain': 'acmecorp.com', 'client_id': client_id, 'crawl_type': 'client', 'entity_id': None},
+        {'domain': 'rival.com', 'client_id': client_id, 'crawl_type': 'competitor', 'entity_id': ent1_id},
+        {'domain': 'competitor-inc.com', 'client_id': client_id, 'crawl_type': 'competitor', 'entity_id': ent2_id},
+    ]
+
+    for entity in entities:
+        _seed_entity_crawl(user_id, entity)
+
+    return jsonify({'success': True, 'client_id': client_id, 'message': 'Demo data created'})
+
+
+def _seed_entity_crawl(user_id, entity):
+    """Generate a completed crawl with dummy URLs, links, and issues"""
+    import uuid, random
+
+    from src.crawl_db import (
+        create_crawl, save_url_batch, save_links_batch,
+        save_issues_batch, set_crawl_status, update_crawl_stats
+    )
+
+    domain = entity['domain']
+    session_id = str(uuid.uuid4())
+    base_url = f'https://{domain}'
+    config = {"maxDepth": 3, "maxUrls": 100, "crawlDelay": 1}
+
+    crawl_id = create_crawl(
+        user_id=user_id, session_id=session_id,
+        base_url=base_url, base_domain=domain,
+        config_snapshot=config,
+        client_id=entity['client_id'],
+        crawl_type=entity['crawl_type'],
+        entity_id=entity['entity_id']
+    )
+    if not crawl_id:
+        return
+
+    # 15 realistic pages
+    pages = [
+        ('/', 'Home', f'Welcome to {domain} - Your Trusted Partner', f'{domain} - Your Trusted Partner', 200),
+        ('/about', 'About Us', f'Learn about {domain} and our mission', f'About - {domain}', 200),
+        ('/services', 'Services', f'Professional services at {domain}', f'Services - {domain}', 200),
+        ('/products', 'Products', f'Browse our products', f'Products - {domain}', 200),
+        ('/blog', 'Blog', f'Latest insights from {domain}', f'Blog - {domain}', 200),
+        ('/blog/seo-tips', 'Top SEO Tips for 2025', f'Essential SEO tips for better rankings', f'SEO Tips - {domain}', 200),
+        ('/blog/web-design', 'Web Design Trends', f'Latest web design trends', f'Web Design - {domain}', 200),
+        ('/contact', 'Contact Us', f'Get in touch with {domain}', f'Contact - {domain}', 200),
+        ('/pricing', 'Pricing', f'Our pricing plans', f'Pricing - {domain}', 200),
+        ('/faq', 'FAQ', '', f'FAQ - {domain}', 200),
+        ('/careers', 'Careers', f'Join the {domain} team', '', 200),
+        ('/old-page', '', '', '', 301),
+        ('/broken-link', '', '', '', 404),
+        ('/terms', 'Terms of Service', f'Terms and conditions', f'Terms - {domain}', 200),
+        ('/privacy', 'Privacy Policy', f'Your privacy matters', f'Privacy - {domain}', 200),
+    ]
+
+    urls = []
+    for path, title, meta_desc, h1, status_code in pages:
+        url = f'{base_url}{path}'
+        word_count = random.randint(200, 1500) if status_code == 200 else 0
+        urls.append({
+            'url': url,
+            'status_code': status_code,
+            'content_type': 'text/html',
+            'size': random.randint(8000, 45000) if status_code == 200 else 0,
+            'is_internal': True,
+            'depth': 0 if path == '/' else (1 if path.count('/') == 1 else 2),
+            'title': title,
+            'meta_description': meta_desc,
+            'h1': h1,
+            'h2': ['Section 1', 'Section 2'] if status_code == 200 else [],
+            'h3': [],
+            'word_count': word_count,
+            'canonical_url': url if status_code == 200 else None,
+            'lang': 'en',
+            'charset': 'UTF-8',
+            'viewport': 'width=device-width, initial-scale=1',
+            'robots': None,
+            'meta_tags': {},
+            'og_tags': {'og:title': title, 'og:type': 'website'} if title else {},
+            'twitter_tags': {},
+            'json_ld': [{'@type': 'Organization', 'name': domain}] if path == '/' else [],
+            'analytics': {'google_analytics': True} if status_code == 200 else {},
+            'images': [
+                {'src': f'{base_url}/img/hero.jpg', 'alt': 'Hero image', 'width': 1200, 'height': 630},
+                {'src': f'{base_url}/img/logo.png', 'alt': '', 'width': 200, 'height': 60},
+            ] if path == '/' else [],
+            'hreflang': [],
+            'schema_org': [],
+            'redirects': [f'{base_url}/new-page'] if status_code == 301 else [],
+            'linked_from': [f'{base_url}/'],
+            'external_links': random.randint(0, 5),
+            'internal_links': random.randint(3, 12),
+            'response_time': round(random.uniform(80, 600), 1),
+            'javascript_rendered': False,
+        })
+
+    save_url_batch(crawl_id, urls)
+
+    # Internal links
+    links = []
+    ok_pages = [p for p in pages if p[4] == 200]
+    for path, title, *_ in ok_pages:
+        targets = random.sample([p for p in ok_pages if p[0] != path], min(3, len(ok_pages) - 1))
+        for tp in targets:
+            links.append({
+                'source_url': f'{base_url}{path}',
+                'target_url': f'{base_url}{tp[0]}',
+                'anchor_text': tp[1] or tp[0],
+                'is_internal': True,
+                'target_domain': domain,
+                'target_status': tp[4],
+                'placement': 'body',
+            })
+    save_links_batch(crawl_id, links)
+
+    # SEO issues
+    issues = [
+        {'url': f'{base_url}/faq', 'type': 'warning', 'category': 'Meta', 'issue': 'Missing meta description', 'details': 'Page has no meta description tag'},
+        {'url': f'{base_url}/careers', 'type': 'warning', 'category': 'Content', 'issue': 'Missing H1', 'details': 'Page has no H1 heading'},
+        {'url': f'{base_url}/broken-link', 'type': 'error', 'category': 'Status Code', 'issue': '404 Not Found', 'details': 'Page returns 404 status code'},
+        {'url': f'{base_url}/old-page', 'type': 'info', 'category': 'Redirect', 'issue': '301 Redirect', 'details': f'Redirects to {base_url}/new-page'},
+        {'url': f'{base_url}/blog/seo-tips', 'type': 'warning', 'category': 'Content', 'issue': 'Low word count', 'details': 'Page has fewer than 300 words'},
+        {'url': f'{base_url}/', 'type': 'warning', 'category': 'Images', 'issue': 'Image missing alt text', 'details': '1 image found without alt attribute'},
+        {'url': f'{base_url}/products', 'type': 'info', 'category': 'Performance', 'issue': 'Slow response time', 'details': 'Response time exceeds 500ms'},
+    ]
+    save_issues_batch(crawl_id, issues)
+
+    # Mark crawl as completed
+    update_crawl_stats(crawl_id, discovered=len(pages), crawled=len(pages), max_depth=2)
+    set_crawl_status(crawl_id, 'completed')
+
+
+# ── Client Off-Page SEO API ───────────────────────────────────────
+
+@app.route('/api/clients/<int:client_id>/gbp', methods=['GET', 'POST'])
+@api_auth_required
+def client_gbp(client_id):
+    """GBP lookup from client business info (no crawl required)"""
+    try:
+        user_id = _get_api_user_id()
+        from src.crawl_db import get_client, get_client_offpage, save_client_offpage
+
+        client = get_client(client_id, user_id)
+        if not client:
+            return jsonify({'success': False, 'error': 'Client not found'}), 404
+
+        refresh = request.args.get('refresh') == '1'
+
+        # Check cache first
+        if not refresh:
+            cached = get_client_offpage(client_id, category='gbp')
+            if cached:
+                return jsonify({'success': True, 'gbp': cached[0].get('data', {}), 'cached': True})
+
+        # Get API key from settings
+        settings_manager = get_session_settings()
+        api_key = settings_manager.get('google_places_api_key') or os.environ.get('GOOGLE_PLACES_API_KEY')
+        if not api_key:
+            return jsonify({'success': False, 'error': 'Google Places API key not configured. Set it in Settings > Requests tab.'})
+
+        from src.gbp_extractor import build_gbp_report_from_client_info
+        business_name = client.get('business_name') or client.get('name')
+        report = build_gbp_report_from_client_info(
+            business_name=business_name,
+            location=client.get('location'),
+            phone=client.get('phone'),
+            domain=client.get('domain'),
+            api_key=api_key,
+        )
+
+        # Cache the result
+        save_client_offpage(client_id, client.get('domain') or '', 'gbp', report)
+
+        return jsonify({'success': True, 'gbp': report, 'cached': False})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/clients/<int:client_id>/social', methods=['GET', 'POST'])
+@api_auth_required
+def client_social(client_id):
+    """Social profile discovery from client business info (no crawl required)"""
+    try:
+        user_id = _get_api_user_id()
+        from src.crawl_db import get_client, get_client_offpage, save_client_offpage
+
+        client = get_client(client_id, user_id)
+        if not client:
+            return jsonify({'success': False, 'error': 'Client not found'}), 404
+
+        refresh = request.args.get('refresh') == '1'
+
+        # Check cache first
+        if not refresh:
+            cached = get_client_offpage(client_id, category='social')
+            if cached:
+                return jsonify({'success': True, 'social': cached[0].get('data', {}), 'cached': True})
+
+        from src.social_extractor import build_social_report_from_client_info
+        business_name = client.get('business_name') or client.get('name')
+        report = build_social_report_from_client_info(
+            business_name=business_name,
+            domain=client.get('domain'),
+        )
+
+        # Cache the result
+        save_client_offpage(client_id, client.get('domain') or '', 'social', report)
+
+        return jsonify({'success': True, 'social': report, 'cached': False})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/clients/<int:client_id>/crawls', methods=['GET'])
+@api_auth_required
+def list_client_crawls(client_id):
+    """List all crawls for a client (own + entities)"""
+    try:
+        user_id = _get_api_user_id()
+        from src.crawl_db import get_client, get_client_crawls
+        client = get_client(client_id, user_id)
+        if not client:
+            return jsonify({'success': False, 'error': 'Client not found'}), 404
+        crawls = get_client_crawls(client_id)
+        return jsonify({'success': True, 'crawls': crawls})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
 
 @app.route('/api/keywords', methods=['GET', 'POST'])
 @login_required
@@ -2228,66 +2722,8 @@ def _cleanup_research_jobs():
         if to_remove:
             print(f"Cleaned up {len(to_remove)} stale research jobs")
 
-def _get_local_user_id():
-    """Get the local admin user ID for API requests (creates user if needed)."""
-    from src.db import get_db, get_cursor, ph
-    try:
-        with get_db() as conn:
-            cursor = get_cursor(conn)
-            cursor.execute(f'SELECT id FROM users WHERE username = {ph()}', ('local',))
-            user = cursor.fetchone()
-            return user['id'] if user else None
-    except Exception:
-        return None
-
-
-def _get_api_user_id():
-    """Resolve user_id for API requests from any auth method."""
-    # From Bearer token auth
-    if hasattr(request, '_api_user_id'):
-        return request._api_user_id
-    # From session
-    if session.get('user_id'):
-        return session['user_id']
-    # In local mode, get the local user
-    if LOCAL_MODE:
-        return _get_local_user_id()
-    return None
-
-
-def api_auth_required(f):
-    """Auth decorator for programmatic API access.
-    In LOCAL_MODE: accepts X-Local-Auth header (no session needed).
-    Otherwise: requires Authorization: Bearer <api_key> header.
-    Falls back to session auth."""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        # Check X-Local-Auth header in local mode
-        if LOCAL_MODE and request.headers.get('X-Local-Auth', '').lower() == 'true':
-            return f(*args, **kwargs)
-
-        # Check Bearer token
-        auth_header = request.headers.get('Authorization', '')
-        if auth_header.startswith('Bearer '):
-            api_key = auth_header[7:]
-            user_id, tier = validate_api_key(api_key)
-            if user_id:
-                request._api_user_id = user_id
-                request._api_tier = tier
-                return f(*args, **kwargs)
-            return jsonify({'error': 'Invalid API key'}), 401
-
-        # Fall back to session auth
-        if LOCAL_MODE and 'user_id' not in session:
-            auto_login_local_mode()
-        if 'user_id' in session:
-            return f(*args, **kwargs)
-
-        return jsonify({'error': 'Authentication required. Use X-Local-Auth: true (local mode) or Authorization: Bearer <key>'}), 401
-    return decorated_function
-
-
-def _build_research_response(crawler, keyword_limit=50, google_places_api_key=''):
+def _build_research_response(crawler, keyword_limit=50, google_places_api_key='',
+                              client_id=None, entity_id=None, crawl_type=None):
     """Build AI-optimized response from crawler results."""
     from src.keyword_extractor import extract_keywords
 
@@ -2405,6 +2841,9 @@ def _build_research_response(crawler, keyword_limit=50, google_places_api_key=''
             'pages_discovered': stats.get('discovered', 0),
             'crawl_duration_seconds': elapsed,
             'analyzed_at': datetime.now().isoformat(),
+            'client_id': client_id,
+            'entity_id': entity_id,
+            'crawl_type': crawl_type or 'standalone',
         },
         'site_summary': {
             'homepage_title': (homepage or {}).get('title', ''),
@@ -2548,6 +2987,9 @@ def _build_response_from_saved_crawl(crawl, keyword_limit=50, google_places_api_
             'crawl_id': crawl_id,
             'crawled_at': crawl.get('completed_at', ''),
             'analyzed_at': datetime.now().isoformat(),
+            'client_id': crawl.get('client_id'),
+            'entity_id': crawl.get('entity_id'),
+            'crawl_type': crawl.get('crawl_type', 'standalone'),
         },
         'site_summary': {
             'homepage_title': (homepage or {}).get('title', ''),
@@ -2637,7 +3079,19 @@ def api_research():
     # Start crawl with user binding for crawl history visibility
     synthetic_session = f"research_{uuid.uuid4().hex[:12]}"
     user_id = _get_api_user_id()
-    success, message = crawler.start_crawl(url, user_id=user_id, session_id=synthetic_session)
+    client_id = data.get('client_id')
+    entity_id = data.get('entity_id')
+    crawl_type = data.get('crawl_type')
+    if not crawl_type:
+        if entity_id:
+            crawl_type = 'competitor'
+        elif client_id:
+            crawl_type = 'client'
+        else:
+            crawl_type = 'standalone'
+    success, message = crawler.start_crawl(url, user_id=user_id, session_id=synthetic_session,
+                                           client_id=client_id, crawl_type=crawl_type,
+                                           entity_id=entity_id)
     if not success:
         return jsonify({'error': message}), 400
 
@@ -2667,7 +3121,8 @@ def api_research():
         }), 202
 
     # Crawl completed — return results immediately
-    return jsonify(_build_research_response(crawler, keyword_limit, google_places_api_key=google_places_api_key))
+    return jsonify(_build_research_response(crawler, keyword_limit, google_places_api_key=google_places_api_key,
+                                            client_id=client_id, entity_id=entity_id, crawl_type=crawl_type))
 
 
 @app.route('/api/research/<job_id>')
@@ -2825,7 +3280,19 @@ def api_research_images():
 
     synthetic_session = f"research_{uuid.uuid4().hex[:12]}"
     user_id = _get_api_user_id()
-    success, message = crawler.start_crawl(url, user_id=user_id, session_id=synthetic_session)
+    client_id = data.get('client_id')
+    entity_id = data.get('entity_id')
+    crawl_type = data.get('crawl_type')
+    if not crawl_type:
+        if entity_id:
+            crawl_type = 'competitor'
+        elif client_id:
+            crawl_type = 'client'
+        else:
+            crawl_type = 'standalone'
+    success, message = crawler.start_crawl(url, user_id=user_id, session_id=synthetic_session,
+                                           client_id=client_id, crawl_type=crawl_type,
+                                           entity_id=entity_id)
     if not success:
         return jsonify({'error': message}), 400
 
@@ -3008,12 +3475,14 @@ def main():
     # Start cleanup thread for old crawler instances
     start_cleanup_thread()
 
+    port = int(os.getenv('PORT', '5000'))
+
     print("=" * 60)
     print("LibreCrawl - SEO Spider")
     print("=" * 60)
-    print(f"\n🚀 Server starting on http://0.0.0.0:5000")
-    print(f"🌐 Access from browser: http://localhost:5000")
-    print(f"📱 Access from network: http://<your-ip>:5000")
+    print(f"\n🚀 Server starting on http://0.0.0.0:{port}")
+    print(f"🌐 Access from browser: http://localhost:{port}")
+    print(f"📱 Access from network: http://<your-ip>:{port}")
     print(f"\n✨ Multi-tenancy enabled - each browser session is isolated")
     print(f"💾 Settings stored in browser localStorage")
     print(f"\nPress Ctrl+C to stop the server\n")
@@ -3022,16 +3491,16 @@ def main():
     # Open browser in a separate thread after short delay
     def open_browser():
         time.sleep(1.5)  # Wait for Flask to start
-        webbrowser.open('http://localhost:5000')
+        webbrowser.open(f'http://localhost:{port}')
 
     browser_thread = threading.Thread(target=open_browser, daemon=True)
     browser_thread.start()
 
     # Run Flask server with Waitress (production-grade WSGI server)
     from waitress import serve
-    print("Starting LibreCrawl on http://localhost:5000")
+    print(f"Starting LibreCrawl on http://localhost:{port}")
     print("Using Waitress WSGI server with multi-threading support")
-    serve(app, host='0.0.0.0', port=int(os.getenv('PORT', '5000')), threads=8)
+    serve(app, host='0.0.0.0', port=port, threads=8)
 
 if __name__ == '__main__':
     main()

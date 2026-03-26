@@ -27,19 +27,109 @@ cd ~/development/LibreCrawl && docker-compose up -d
 
 Wait a few seconds and re-check. If it still fails after 10 seconds, inform the user that LibreCrawl could not be started.
 
-### Step 2: Create the output folder
+### Step 2: Resolve the client
 
-All research results go into a `seo-research/` folder **in the current working directory**. Create it if it doesn't exist. Files are named by domain and date:
+Every research session should be linked to a client when the user provides client context (client name, business name, or says "for client X"). This enables tracking research history per client and linking competitor data.
+
+**Check if client exists:**
+
+```bash
+curl -s http://localhost:5000/api/clients \
+  -H "X-Local-Auth: true" | jq '.clients[] | select(.name == "CLIENT_NAME" or .domain == "DOMAIN")'
+```
+
+**Create client if not found:**
+
+```bash
+curl -s -X POST http://localhost:5000/api/clients \
+  -H "X-Local-Auth: true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Client Name",
+    "domain": "clientdomain.com",
+    "business_name": "Client Business Name",
+    "location": "City, State",
+    "phone": "+1 555-0100",
+    "address": "123 Main St, City, State 12345"
+  }'
+```
+
+Response: `{"success": true, "client_id": 1}`
+
+Store the `client_id` for all subsequent calls.
+
+**Skip this step** if the user gives no client context (e.g. "just research example.com"). In that case, proceed in standalone mode without a `client_id`.
+
+### Step 3: Resolve entities (competitors/branches)
+
+When the user wants to research competitors or multiple branches, register them as entities under the client.
+
+**List existing entities:**
+
+```bash
+curl -s http://localhost:5000/api/clients/<CLIENT_ID>/entities \
+  -H "X-Local-Auth: true"
+```
+
+Optional filter: `?type=competitor` or `?type=branch`
+
+**Add a new entity:**
+
+```bash
+curl -s -X POST http://localhost:5000/api/clients/<CLIENT_ID>/entities \
+  -H "X-Local-Auth: true" \
+  -H "Content-Type: application/json" \
+  -d '{"domain": "competitor.com", "name": "Competitor Name", "type": "competitor"}'
+```
+
+Response: `{"success": true, "entity_id": 5}`
+
+Valid types: `"competitor"` (default), `"branch"`.
+
+Store the `entity_id` for competitor/branch research calls.
+
+### Step 4: Create the output folder
+
+All research results go into a `seo-research/` folder **in the current working directory**. When working with a client, organize by client name:
 
 ```
 seo-research/
-  example-com_2026-03-13.json
-  competitor-site-net_2026-03-13.json
+  client-name/
+    clientdomain-com_2026-03-25.json
+    competitors/
+      competitor-com_2026-03-25.json
+      rival-net_2026-03-25.json
 ```
 
-### Step 3: Call the Research API
+For standalone research (no client):
+```
+seo-research/
+  example-com_2026-03-25.json
+```
+
+### Step 5: Call the Research API
 
 For each URL the user provides, call:
+
+**Client's own site:**
+
+```bash
+curl -s -X POST http://localhost:5000/api/research \
+  -H "X-Local-Auth: true" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "<THE_URL>", "client_id": <CLIENT_ID>, "max_urls": 500, "max_depth": 3, "keyword_limit": 100}'
+```
+
+**Competitor site:**
+
+```bash
+curl -s -X POST http://localhost:5000/api/research \
+  -H "X-Local-Auth: true" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "<COMPETITOR_URL>", "client_id": <CLIENT_ID>, "entity_id": <ENTITY_ID>, "max_urls": 500, "max_depth": 3, "keyword_limit": 100}'
+```
+
+**Standalone (no client):**
 
 ```bash
 curl -s -X POST http://localhost:5000/api/research \
@@ -54,26 +144,56 @@ curl -s -X POST http://localhost:5000/api/research \
 - `keyword_limit` (default 100) - number of keywords to extract
 - `force_recrawl` (default false) - set to true to bypass cache
 - `timeout` (default 180) - max seconds to wait
+- `crawl_type` - override auto-detection: `"client"`, `"competitor"`, `"branch"`, or `"standalone"`
 
 The API blocks until the crawl completes (typically 15-60 seconds for most sites). If it returns status `"running"` with a `job_id`, poll `GET /api/research/<job_id>` every 5 seconds until complete.
 
-### Step 4: Save the raw results
+The response `meta` includes `client_id`, `entity_id`, and `crawl_type` to confirm the data was linked correctly.
 
-Save the full JSON response to:
+### Step 6: Off-page research (optional, no crawl needed)
+
+When a client is set up with business info, you can fetch off-page data without running a crawl:
+
+**Google Business Profile:**
+
+```bash
+curl -s http://localhost:5000/api/clients/<CLIENT_ID>/gbp \
+  -H "X-Local-Auth: true"
 ```
-seo-research/<domain>_<YYYY-MM-DD>.json
+
+Returns GBP data (rating, reviews, hours, photos, NAP audit) from client metadata. Requires a Google Places API key to be configured in settings or environment.
+
+**Social profiles:**
+
+```bash
+curl -s http://localhost:5000/api/clients/<CLIENT_ID>/social \
+  -H "X-Local-Auth: true"
 ```
+
+Returns discovered social media profiles for the client's business.
+
+Both endpoints cache results. Add `?refresh=1` to force a fresh lookup.
+
+### Step 7: Save the raw results
+
+Save the full JSON response to the appropriate location:
+
+- Client research: `seo-research/<client-name>/<domain>_<YYYY-MM-DD>.json`
+- Competitor research: `seo-research/<client-name>/competitors/<domain>_<YYYY-MM-DD>.json`
+- Standalone: `seo-research/<domain>_<YYYY-MM-DD>.json`
 
 Replace dots and special characters in the domain with hyphens for the filename.
 
-### Step 5: Print a summary
+### Step 8: Print a summary
 
 After saving, print a concise summary:
 
 ```
-Research saved: seo-research/example-com_2026-03-13.json
+Research saved: seo-research/acme-corp/acmecorp-com_2026-03-25.json
 
-  Domain:     example.com
+  Client:     Acme Corp (client_id=1)
+  Domain:     acmecorp.com
+  Type:       client
   Pages:      42 crawled / 89 discovered
   Cached:     no (fresh crawl, 22.4s)
   Issues:     20 (SEO: 8, Technical: 5, Content: 4, Accessibility: 3)
@@ -84,11 +204,41 @@ Research saved: seo-research/example-com_2026-03-13.json
     ...
 ```
 
+For competitor research, include the entity context:
+
+```
+Research saved: seo-research/acme-corp/competitors/rival-com_2026-03-25.json
+
+  Client:     Acme Corp (client_id=1)
+  Competitor: Rival Inc (entity_id=5)
+  Domain:     rival.com
+  Type:       competitor
+  ...
+```
+
 ## Handling Multiple URLs
 
 When the user provides multiple URLs (competitors), process them **sequentially** (LibreCrawl handles one crawl at a time per request, but the API creates isolated crawler instances so concurrent calls from separate agents work fine).
 
 If the user asks you to research multiple sites, tell them you'll process them one at a time, showing progress as you go.
+
+## Client Management API Reference
+
+These APIs all use `X-Local-Auth: true` for authentication in local mode.
+
+| Method | Route | Purpose |
+|--------|-------|---------|
+| GET | `/api/clients` | List all clients |
+| POST | `/api/clients` | Create client (name required) |
+| GET | `/api/clients/<id>` | Get client with entities, crawls, offpage data |
+| PUT | `/api/clients/<id>` | Update client fields |
+| DELETE | `/api/clients/<id>` | Delete client |
+| GET | `/api/clients/<id>/entities` | List entities (?type= filter) |
+| POST | `/api/clients/<id>/entities` | Add entity (domain, name, type) |
+| DELETE | `/api/clients/<id>/entities/<eid>` | Remove entity |
+| GET | `/api/clients/<id>/crawls` | List crawls grouped by type |
+| GET | `/api/clients/<id>/gbp` | GBP lookup from client info |
+| GET | `/api/clients/<id>/social` | Social profile discovery |
 
 ## Response Format Reference
 
@@ -105,8 +255,9 @@ The API returns this structure (for your understanding, do not explain this to t
     "pages_discovered": 0,
     "crawl_duration_seconds": 0,
     "analyzed_at": "ISO datetime",
-    "total_crawls_for_domain": 1,
-    "note": "optional, present when multiple crawls exist"
+    "client_id": 1,
+    "entity_id": null,
+    "crawl_type": "client"
   },
   "site_summary": {
     "homepage_title": "string",
@@ -215,7 +366,7 @@ Pass `google_places_api_key` in the request body:
 curl -s -X POST http://localhost:5000/api/research \
   -H "X-Local-Auth: true" \
   -H "Content-Type: application/json" \
-  -d '{"url": "<THE_URL>", "google_places_api_key": "<KEY>"}'
+  -d '{"url": "<THE_URL>", "client_id": <CLIENT_ID>, "google_places_api_key": "<KEY>"}'
 ```
 
 If the server has `GOOGLE_PLACES_API_KEY` set as an environment variable, it will be used automatically without needing to pass it per-request.
@@ -244,9 +395,12 @@ curl -s http://localhost:5000/api/gbp?api_key=<KEY> -H "X-Local-Auth: true"
 
 # For a saved crawl by ID
 curl -s http://localhost:5000/api/gbp/29?api_key=<KEY> -H "X-Local-Auth: true"
+
+# From client metadata (no crawl needed)
+curl -s http://localhost:5000/api/clients/<CLIENT_ID>/gbp -H "X-Local-Auth: true"
 ```
 
-Without an API key, these endpoints return only the extracted contact info from the website (no Google Places lookup).
+Without an API key, the crawl-based endpoints return only the extracted contact info from the website (no Google Places lookup).
 
 ## Image Research API
 
@@ -256,11 +410,13 @@ For detailed image SEO analysis, call the images endpoint after the main researc
 curl -s -X POST http://localhost:5000/api/research/images \
   -H "X-Local-Auth: true" \
   -H "Content-Type: application/json" \
-  -d '{"url": "<THE_URL>"}'
+  -d '{"url": "<THE_URL>", "client_id": <CLIENT_ID>, "entity_id": <ENTITY_ID>}'
 ```
 
 **Options:**
 - `url` (required) - the site URL to analyze
+- `client_id` (optional) - link to client
+- `entity_id` (optional) - link to entity (competitor/branch)
 - `force_recrawl` (default false) - bypass cache
 - `cache_max_age_hours` (default 24) - cache freshness threshold
 - `max_urls` (default 500) - max pages to crawl
@@ -268,12 +424,12 @@ curl -s -X POST http://localhost:5000/api/research/images \
 
 Save the image results to:
 ```
-seo-research/<domain>_images_<YYYY-MM-DD>.json
+seo-research/<client-name>/<domain>_images_<YYYY-MM-DD>.json
 ```
 
 Print an image summary after saving:
 ```
-Image analysis saved: seo-research/example-com_images_2026-03-13.json
+Image analysis saved: seo-research/acme-corp/acmecorp-com_images_2026-03-25.json
 
   Total images:    85
   Missing alt:     12 (14.1%)

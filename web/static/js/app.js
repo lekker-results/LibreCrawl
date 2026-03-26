@@ -60,12 +60,18 @@ function openStatsModal() { document.getElementById('statsModal').style.display 
 function closeStatsModal() { document.getElementById('statsModal').style.display = 'none'; }
 
 // Application State
+// Active client context (set by selectClient, cleared by deselectClient)
+window.activeClient = null;
+
 let crawlState = {
     isRunning: false,
     isPaused: false,
     startTime: null,
     baseUrl: null,
     loadedCrawlId: null,
+    clientId: null,
+    crawlType: 'standalone',
+    entityId: null,
     urls: [],
     links: [],
     issues: [],
@@ -128,6 +134,8 @@ async function initializeApp() {
     if (sessionStorage.getItem('force_ui_refresh') === 'true') {
         console.log('DEBUG: Found force_ui_refresh flag, loading crawl data...');
         sessionStorage.removeItem('force_ui_refresh');
+        // Ensure workspace is visible
+        if (typeof hideWelcomePage === 'function') hideWelcomePage();
 
         try {
             // Fetch the loaded data immediately with FULL refresh (no incremental)
@@ -285,6 +293,11 @@ function startCrawl() {
     crawlState.startTime = new Date();
     crawlState.baseUrl = url;
     crawlState.loadedCrawlId = null;
+    // clientId/crawlType are set by startClientCrawl() if launching from workspace;
+    // reset to standalone only if not already set for this crawl
+    if (!crawlState.clientId) {
+        crawlState.crawlType = 'standalone';
+    }
 
     // Initialize incremental poller for new crawl
     if (!incrementalPoller) {
@@ -295,7 +308,10 @@ function startCrawl() {
     // Update UI
     updateCrawlButtons();
     showProgress();
+    updateProgress(0);
+    document.querySelector('.progress-bar').classList.add('crawling');
     updateStatus('Starting crawl...');
+    document.getElementById('progressText').textContent = 'Starting crawl...';
 
     // Clear previous data
     clearAllTables();
@@ -336,6 +352,7 @@ function stopCrawl() {
     crawlState.isPaused = false;
 
     // Update UI
+    document.querySelector('.progress-bar').classList.remove('crawling');
     updateCrawlButtons();
     hideProgress();
     updateStatus('Crawl stopped');
@@ -359,6 +376,12 @@ function clearCrawlData() {
     crawlState.links = [];
     crawlState.issues = [];
     crawlState.baseUrl = null;
+    // Preserve client/entity context if active, only reset if no client
+    if (!window.activeClient) {
+        crawlState.clientId = null;
+        crawlState.crawlType = 'standalone';
+        crawlState.entityId = null;
+    }
     crawlState.filters.active = null;
     crawlState.pendingLinks = null;
     crawlState.pendingIssues = null;
@@ -409,16 +432,21 @@ function clearCrawlData() {
 
 function startPythonCrawl(url) {
     // Call Python backend to start crawling
+    const body = { url: url };
+    if (crawlState.clientId) body.client_id = crawlState.clientId;
+    if (crawlState.crawlType && crawlState.crawlType !== 'standalone') body.crawl_type = crawlState.crawlType;
+    if (crawlState.entityId) body.entity_id = crawlState.entityId;
     fetch('/api/start_crawl', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ url: url })
+        body: JSON.stringify(body)
     })
     .then(response => response.json())
     .then(data => {
         if (data.success) {
+            if (data.crawl_id) crawlState.loadedCrawlId = data.crawl_id;
             updateStatus('Crawling in progress...');
             // Refresh user info to update crawl count
             loadUserInfo();
@@ -477,6 +505,9 @@ function pollCrawlProgress() {
             if (crawlState.isRunning && data.status !== 'completed') {
                 setTimeout(pollCrawlProgress, 1000); // Poll every second
             } else if (data.status === 'completed') {
+                if (typeof window.updateEntityTabNameFromCrawl === 'function') {
+                    window.updateEntityTabNameFromCrawl(data.urls || []);
+                }
                 stopCrawl();
                 updateStatus('Crawl completed');
                 // Update visualization one final time when crawl completes

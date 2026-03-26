@@ -14,72 +14,113 @@
         <header class="header">
             <div class="header-content">
                 <h1 class="app-title">LibreCrawl</h1>
+                <div class="client-search-wrapper" id="clientsDropdown">
+                    <input type="text" id="clientSearchInput" class="client-search-input" placeholder="Search clients..." autocomplete="off"
+                        onfocus="openClientsResults()" oninput="filterClients(this.value)">
+                    <div class="client-search-results" id="clientsDropdownMenu">
+                        <div id="clientsDropdownList"></div>
+                    </div>
+                    <button class="btn btn-secondary client-add-btn" onclick="openNewClientForm()" title="New Client">+</button>
+                </div>
                 <div class="header-actions">
-                    <span id="userInfo" class="user-info-text"></span>
-                    <button class="btn btn-secondary" id="themeToggleBtn" onclick="toggleTheme()" title="Switch to light theme" style="padding: 8px 10px; line-height: 1;"></button>
-                    <button class="btn btn-secondary" onclick="openDashboard()">Dashboard</button>
+                    <button class="btn btn-secondary" id="themeToggleBtn" onclick="toggleTheme()" title="Switch to light theme"></button>
                     <button class="btn btn-secondary" onclick="openSettings()">Settings</button>
                     <button class="btn btn-secondary" onclick="exportData()">Export</button>
                     <button class="btn btn-success" id="saveCrawlBtn" onclick="saveCrawl()" disabled>Save Crawl</button>
                     <button class="btn btn-primary" id="loadCrawlBtn" onclick="loadCrawl()">Load Crawl</button>
-                    <button class="btn btn-danger" onclick="logout()" style="margin-left: 10px;">Logout</button>
+                    <span id="userInfo" class="user-info-text"></span>
+                    <button class="btn btn-danger" onclick="logout()">Logout</button>
                 </div>
             </div>
         </header>
 
-        <!-- URL Input Section -->
-        <section class="url-section">
-            <div class="url-container">
-                <div class="input-group">
-                    <label for="urlInput" class="input-label">URL to Crawl</label>
-                    <input
-                        type="url"
-                        id="urlInput"
-                        class="url-input"
-                        placeholder="https://example.com"
-                        onkeypress="handleUrlKeypress(event)"
-                    >
+        <!-- Welcome Page (shown when no client is selected) -->
+        <div id="welcomePage" class="welcome-page">
+            <div class="welcome-content">
+                <div class="welcome-hero">
+                    <h2 class="welcome-title">Welcome to LibreCrawl</h2>
+                    <p class="welcome-subtitle">Select a client to begin, or create a new one.</p>
                 </div>
-                <div class="control-buttons">
-                    <button id="startBtn" class="btn btn-primary" onclick="toggleCrawl()">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                            <path d="M8 5v14l11-7z"/>
-                        </svg>
-                        Start
-                    </button>
-                    <button id="stopBtn" class="btn btn-danger" onclick="stopCrawl()" disabled>
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                            <rect x="6" y="6" width="12" height="12"/>
-                        </svg>
-                        Stop
-                    </button>
-                    <button id="clearBtn" class="btn btn-secondary" onclick="clearCrawlData()">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                            <path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
-                        </svg>
-                        Clear
-                    </button>
-                    <button class="btn btn-secondary" onclick="openFiltersModal()">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/>
-                        </svg>
-                        Filters
-                    </button>
-                    <button class="btn btn-secondary" onclick="openStatsModal()">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M18 20V10M12 20V4M6 20v-6"/>
-                        </svg>
-                        Stats
-                    </button>
+                <div class="welcome-actions">
+                    <button class="btn btn-primary" onclick="openNewClientForm()">+ New Client</button>
                 </div>
+                <div class="welcome-clients-list" id="welcomeClientsList"></div>
             </div>
-            <div class="progress-container" id="progressContainer" style="display: none;">
-                <div class="progress-bar">
-                    <div class="progress-fill" id="progressFill"></div>
-                </div>
-                <span class="progress-text" id="progressText">Initializing...</span>
+        </div>
+
+        <!-- Entity Workspace: tab bar + URL section are visually one unit -->
+        <div id="entityWorkspace" class="entity-workspace">
+            <!-- Entity Tab Bar (hidden when no client selected) -->
+            <div id="entityTabBar" class="entity-tab-bar" style="display:none;">
+                <div class="entity-tab-list" id="entityTabList"></div>
+                <button class="entity-tab-add" id="entityTabAddBtn" onclick="showAddEntityModal()" title="Add entity">+</button>
+                <button class="entity-tab-edit" id="entityTabEditBtn" onclick="openEditClientModal()" title="Edit client">&#9998;</button>
+                <div style="flex:1;"></div>
+                <button class="entity-tab-close" onclick="deselectClient()" title="Close client">&times;</button>
             </div>
-        </section>
+
+            <!-- URL Input Section -->
+            <section class="url-section">
+                <div class="url-container">
+                    <div class="input-group">
+                        <label for="urlInput" class="input-label">URL to Crawl</label>
+                        <input
+                            type="url"
+                            id="urlInput"
+                            class="url-input"
+                            placeholder="https://example.com"
+                            onkeypress="handleUrlKeypress(event)"
+                        >
+                    </div>
+                    <div id="crawlTypeWrapper" style="display:none;" class="crawl-type-group">
+                        <label class="input-label">Category</label>
+                        <select id="crawlTypeSelect" class="crawl-type-select" onchange="onCrawlTypeChange(this.value)">
+                            <option value="client">Client</option>
+                            <option value="competitor">Competitor</option>
+                            <option value="branch">Branch</option>
+                        </select>
+                    </div>
+                    <div class="control-buttons">
+                        <button id="startBtn" class="btn btn-primary" onclick="toggleCrawl()">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M8 5v14l11-7z"/>
+                            </svg>
+                            Start
+                        </button>
+                        <button id="stopBtn" class="btn btn-danger" onclick="stopCrawl()" disabled>
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                <rect x="6" y="6" width="12" height="12"/>
+                            </svg>
+                            Stop
+                        </button>
+                        <button id="clearBtn" class="btn btn-secondary" onclick="clearCrawlData()">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                            </svg>
+                            Clear
+                        </button>
+                        <button class="btn btn-secondary" onclick="openFiltersModal()">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/>
+                            </svg>
+                            Filters
+                        </button>
+                        <button class="btn btn-secondary" onclick="openStatsModal()">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M18 20V10M12 20V4M6 20v-6"/>
+                            </svg>
+                            Stats
+                        </button>
+                    </div>
+                </div>
+                <div class="progress-container" id="progressContainer" style="display: none;">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
+                    <span class="progress-text" id="progressText">Initializing...</span>
+                </div>
+            </section>
+        </div>
 
         <!-- Main Content -->
         <main class="main-content">
@@ -406,6 +447,9 @@
                                 </div>
                             </div>
                         </div>
+
+                        <!-- Off-Page View (shown when client Off-Page mode is active) -->
+                        <div id="offpage-view" class="offpage-view" style="display:none;"></div>
                     </div>
                 </div>
             </div>
@@ -419,21 +463,6 @@
     </div>
 
     <!-- Settings Modal -->
-    <!-- Dashboard Modal -->
-    <div id="dashboardModal" class="modal" style="display: none;">
-        <div class="modal-content" style="max-width: 1200px;">
-            <div class="modal-header">
-                <h2>Crawl History</h2>
-                <button class="modal-close" onclick="closeDashboard()">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div id="dashboardContent" style="padding: 20px;">
-                    <p style="text-align: center; color: #9ca3af;">Loading crawls...</p>
-                </div>
-            </div>
-        </div>
-    </div>
-
     <div id="settingsModal" class="modal" style="display: none;">
         <div class="modal-content">
             <div class="modal-header">
@@ -1123,6 +1152,85 @@
             <div class="loading-overlay-subtext" id="loadingSubtext"></div>
         </div>
     </div>
+    <!-- Add Entity Modal -->
+    <div id="addEntityModal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)hideAddEntityModal()">
+        <div class="compact-modal" style="max-width:360px;">
+            <div class="compact-modal-header">
+                <h3 class="compact-modal-title">Add Entity</h3>
+                <button class="compact-modal-close" onclick="hideAddEntityModal()">&times;</button>
+            </div>
+            <div class="compact-modal-body">
+                <div class="setting-group">
+                    <label class="setting-label">Domain <span style="color:#f87171">*</span></label>
+                    <input type="text" id="addEntityDomain" class="setting-input" placeholder="competitor.com" onkeypress="if(event.key==='Enter')submitAddEntityModal()">
+                </div>
+                <div class="setting-group" style="margin-top:12px;">
+                    <label class="setting-label">Name (optional)</label>
+                    <input type="text" id="addEntityName" class="setting-input" placeholder="Competitor Name" onkeypress="if(event.key==='Enter')submitAddEntityModal()">
+                </div>
+                <div class="setting-group" style="margin-top:12px;">
+                    <label class="setting-label">Type</label>
+                    <select id="addEntityType" class="setting-input">
+                        <option value="competitor">Competitor</option>
+                        <option value="branch">Branch</option>
+                    </select>
+                </div>
+                <div class="setting-group" style="margin-top:12px;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <input type="checkbox" id="addEntityAutoCrawl" checked style="accent-color:var(--accent-1);width:15px;height:15px;">
+                        <span class="setting-label" style="margin-bottom:0;">Start crawl immediately</span>
+                    </label>
+                </div>
+                <div style="display:flex;gap:8px;margin-top:16px;">
+                    <button class="btn btn-primary" onclick="submitAddEntityModal()">Add</button>
+                    <button class="btn btn-secondary" onclick="hideAddEntityModal()">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Quick Add Client Modal -->
+    <div id="addClientModal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)hideAddClientModal()">
+        <div class="compact-modal" style="max-width:380px;">
+            <div class="compact-modal-header">
+                <h3 class="compact-modal-title">New Client</h3>
+                <button class="compact-modal-close" onclick="hideAddClientModal()">&times;</button>
+            </div>
+            <div class="compact-modal-body">
+                <div class="setting-group">
+                    <label class="setting-label">Domain <span style="color:#f87171">*</span></label>
+                    <input type="text" id="addClientDomain" class="setting-input" placeholder="acmecorp.com" onkeypress="if(event.key==='Enter')submitAddClientModal()">
+                </div>
+                <div class="setting-group" style="margin-top:12px;">
+                    <label class="setting-label">Client Name (optional)</label>
+                    <input type="text" id="addClientName" class="setting-input" placeholder="Acme Corp" onkeypress="if(event.key==='Enter')submitAddClientModal()">
+                </div>
+                <div class="setting-group" style="margin-top:12px;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <input type="checkbox" id="addClientAutoCrawl" checked style="accent-color:var(--accent-1);width:15px;height:15px;">
+                        <span class="setting-label" style="margin-bottom:0;">Start crawl immediately</span>
+                    </label>
+                </div>
+                <div style="display:flex;gap:8px;margin-top:16px;">
+                    <button class="btn btn-primary" onclick="submitAddClientModal()">Create</button>
+                    <button class="btn btn-secondary" onclick="hideAddClientModal()">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Client Modal -->
+    <div id="editClientModal" class="modal-overlay" style="display:none;" onclick="if(event.target===this)hideEditClientModal()">
+        <div class="compact-modal edit-client-modal">
+            <div class="compact-modal-header">
+                <h3 class="compact-modal-title">Edit Client</h3>
+                <button class="compact-modal-close" onclick="hideEditClientModal()">&times;</button>
+            </div>
+            <div class="compact-modal-body" id="editClientModalBody">
+            </div>
+        </div>
+    </div>
+
     <script src="/static/js/app.js"></script>
     <script src="/static/js/dashboard.js"></script>
     <script src="/static/js/settings.js"></script>
