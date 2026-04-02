@@ -25,9 +25,6 @@
                 <div class="header-actions">
                     <button class="btn btn-secondary" id="themeToggleBtn" onclick="toggleTheme()" title="Switch to light theme"></button>
                     <button class="btn btn-secondary" onclick="openSettings()">Settings</button>
-                    <button class="btn btn-secondary" onclick="exportData()">Export</button>
-                    <button class="btn btn-success" id="saveCrawlBtn" onclick="saveCrawl()" disabled>Save Crawl</button>
-                    <button class="btn btn-primary" id="loadCrawlBtn" onclick="loadCrawl()">Load Crawl</button>
                     <span id="userInfo" class="user-info-text"></span>
                     <button class="btn btn-danger" onclick="logout()">Logout</button>
                 </div>
@@ -44,6 +41,10 @@
                 <div class="welcome-actions">
                     <button class="btn btn-primary" onclick="openNewClientForm()">+ New Client</button>
                 </div>
+                <div class="welcome-search-bar-wrapper">
+                    <input type="text" id="welcomeSearchInput" class="welcome-search-input"
+                           placeholder="Search clients..." oninput="filterWelcomeGrid(this.value)" autocomplete="off">
+                </div>
                 <div class="welcome-clients-list" id="welcomeClientsList"></div>
             </div>
         </div>
@@ -58,6 +59,9 @@
                 <div style="flex:1;"></div>
                 <button class="entity-tab-close" onclick="deselectClient()" title="Close client">&times;</button>
             </div>
+
+            <!-- Phase 7: pipeline status strip (populated by dashboard.js) -->
+            <div id="client-pipeline-status" class="client-pipeline-status" style="display:none;"></div>
 
             <!-- URL Input Section -->
             <section class="url-section">
@@ -111,6 +115,10 @@
                             </svg>
                             Stats
                         </button>
+                        <span class="control-buttons-divider"></span>
+                        <button class="btn btn-secondary" onclick="exportData()">Export</button>
+                        <button class="btn btn-secondary" id="saveCrawlBtn" onclick="saveCrawl()" disabled>Save JSON</button>
+                        <button class="btn btn-secondary" id="loadCrawlBtn" onclick="loadCrawl()">Load JSON</button>
                     </div>
                 </div>
                 <div class="progress-container" id="progressContainer" style="display: none;">

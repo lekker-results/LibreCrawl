@@ -28,30 +28,100 @@ async function showWelcomePage() {
             return;
         }
 
-        listEl.innerHTML = data.clients.map(c => {
+        const cards = data.clients.map(c => {
             const name = escapeHtml(c.name);
-            const domain = escapeHtml(c.domain || 'No domain');
+            const domain = escapeHtml(c.domain || '—');
             const crawlCount = c.crawl_count || 0;
             const lastCrawl = c.last_crawl_at ? new Date(c.last_crawl_at).toLocaleDateString() : 'Never';
+            const initial = c.name.charAt(0).toUpperCase();
             return `<div class="welcome-client-card" onclick="selectClient(${c.id}, '${name.replace(/'/g, "\\'")}')">
-                <div class="welcome-client-info">
-                    <span class="welcome-client-name">${name}</span>
-                    <span class="welcome-client-domain">${domain}</span>
+                <div class="welcome-client-header">
+                    <div class="welcome-client-avatar">${initial}</div>
+                    <div class="welcome-client-info">
+                        <span class="welcome-client-name">${name}</span>
+                        <span class="welcome-client-domain">${domain}</span>
+                    </div>
                 </div>
-                <div class="welcome-client-meta">
+                <div class="welcome-client-footer">
                     <span>${crawlCount} crawl${crawlCount !== 1 ? 's' : ''}</span>
                     <span>Last: ${lastCrawl}</span>
                 </div>
             </div>`;
-        }).join('');
+        });
+        listEl.innerHTML = cards.join('');
     } catch (e) {
         console.error('Error loading welcome page clients:', e);
         listEl.innerHTML = '<div class="welcome-empty" style="color:var(--status-error);">Error loading clients</div>';
     }
 }
 
+// ── Phase 7: Pipeline badge enhancement for welcome page ──────────
+// Runs after the original showWelcomePage completes to append pipeline
+// and portal data to each client card. Non-destructive — original
+// card markup is preserved.
+
+const _originalShowWelcomePage = showWelcomePage;
+showWelcomePage = async function() {
+    await _originalShowWelcomePage();
+
+    // Fetch pipeline summary (best-effort — fail silently)
+    let pipelineByClientId = {};
+    try {
+        const resp = await fetch('/api/pipeline');
+        const data = await resp.json();
+        if (data.success && data.clients) {
+            data.clients.forEach(c => {
+                pipelineByClientId[c.client_id] = c;
+            });
+        }
+    } catch (e) {
+        return;
+    }
+
+    if (Object.keys(pipelineByClientId).length === 0) return;
+
+    // Patch each card to add pipeline badge
+    document.querySelectorAll('#welcomeClientsList .welcome-client-card').forEach(card => {
+        const onclickAttr = card.getAttribute('onclick') || '';
+        const match = onclickAttr.match(/selectClient\((\d+)/);
+        if (!match) return;
+        const clientId = parseInt(match[1], 10);
+        const pipeline = pipelineByClientId[clientId];
+        if (!pipeline) return;
+
+        const phase      = pipeline.client_phase || '';
+        const stageName  = pipeline.stage_name || '';
+        const daysInStage = pipeline.days_in_stage || 0;
+        const pc         = pipeline.portal_completion || {};
+        const total      = pc.total || 0;
+        const completed  = pc.completed || 0;
+        const overdue    = pc.overdue || 0;
+
+        const footer = card.querySelector('.welcome-client-footer');
+        if (!footer) return;
+
+        const badgeRow = document.createElement('div');
+        badgeRow.className = 'welcome-pipeline-row';
+        badgeRow.style.cssText = 'display:flex; align-items:center; gap:8px; flex-wrap:wrap;';
+        badgeRow.innerHTML = `
+            <span class="pipeline-phase-badge" data-phase="${escapeHtml(phase)}">${escapeHtml(phase)}: ${escapeHtml(stageName)}</span>
+            ${total > 0 ? `<span class="portal-completion-indicator">${completed}/${total}</span>` : ''}
+            ${overdue > 0 ? `<span class="portal-overdue-badge">${overdue} overdue</span>` : ''}
+            <span class="pipeline-days-indicator">${daysInStage}d</span>
+        `;
+        card.insertBefore(badgeRow, footer);
+    });
+};
+
 function hideWelcomePage() {
     document.querySelector('.app-container').classList.remove('welcome-mode');
+}
+
+function filterWelcomeGrid(query) {
+    const q = (query || '').toLowerCase().trim();
+    document.querySelectorAll('#welcomeClientsList .welcome-client-card').forEach(card => {
+        card.style.display = (!q || card.textContent.toLowerCase().includes(q)) ? '' : 'none';
+    });
 }
 
 async function seedDemoData() {
@@ -192,11 +262,60 @@ async function selectClient(clientId, clientName) {
         renderEntityTabs();
         // Auto-select client tab
         await switchEntity(0);
+
+        // Phase 7: show pipeline status strip
+        updateClientPipelineStrip(clientId);
     } catch (e) {
         console.error('Error loading client:', e);
         showNotification('Error loading client', 'error');
     } finally {
         hideLoading();
+    }
+}
+
+async function updateClientPipelineStrip(clientId) {
+    const strip = document.getElementById('client-pipeline-status');
+    if (!strip) return;
+    try {
+        const resp = await fetch(`/api/clients/${clientId}/pipeline`);
+        const data = await resp.json();
+        if (!data.success || !data.current) {
+            strip.style.display = 'none';
+            return;
+        }
+        const c = data.current;
+        const phase     = c.client_phase || '';
+        const stageName = c.stage_name || '';
+        const stage     = c.stage || '';
+        const daysInStage = c.stage_entered_at
+            ? Math.floor((Date.now() - new Date(c.stage_entered_at)) / 86400000)
+            : 0;
+
+        let portalSummary = '';
+        try {
+            const presp = await fetch(`/api/clients/${clientId}/portal`);
+            const pdata = await presp.json();
+            if (pdata.success && pdata.portal && pdata.portal.checklist) {
+                const ch = pdata.portal.checklist;
+                portalSummary = `
+                    <span class="client-pipeline-portal">
+                        Portal: ${ch.completed}/${ch.total} items
+                        ${ch.overdue > 0 ? `<span class="portal-overdue-badge">(${ch.overdue} overdue)</span>` : ''}
+                    </span>
+                `;
+            }
+        } catch (e) { /* portal data unavailable */ }
+
+        strip.innerHTML = `
+            <span class="pipeline-phase-badge" data-phase="${escapeHtml(phase)}">
+                Stage ${stage} — ${escapeHtml(stageName)}
+            </span>
+            <span class="client-pipeline-days">${daysInStage}d in stage</span>
+            ${portalSummary}
+        `;
+        strip.style.display = 'flex';
+    } catch (e) {
+        strip.style.display = 'none';
     }
 }
 
@@ -206,6 +325,8 @@ function deselectClient() {
     window.activeEntityIndex = -1;
     document.getElementById('entityTabBar').style.display = 'none';
     document.getElementById('crawlTypeWrapper').style.display = 'none';
+    const _strip = document.getElementById('client-pipeline-status');
+    if (_strip) _strip.style.display = 'none';
     crawlState.clientId = null;
     crawlState.crawlType = 'standalone';
     crawlState.entityId = null;
@@ -239,7 +360,7 @@ function renderEntityTabs() {
         const isActive = i === window.activeEntityIndex;
         const isComp = entity.type === 'competitor';
         const isBranch = entity.type === 'branch';
-        const icon = isComp ? '<span class="entity-tab-icon">&#9876;</span>' : (isBranch ? '<span class="entity-tab-icon">&#9679;</span>' : '');
+        const icon = isComp ? '<span class="entity-tab-icon entity-tab-icon--comp">&#9670;</span>' : (isBranch ? '<span class="entity-tab-icon entity-tab-icon--branch">&#9679;</span>' : '');
         const label = escapeHtml(entity.name || entity.domain);
         html += `<button class="entity-tab${isActive ? ' active' : ''}${isComp ? ' competitor' : ''}${isBranch ? ' branch' : ''}" onclick="switchEntity(${i})" ondblclick="startTabRename(${i}, event)" title="${escapeHtml(entity.domain || entity.name)}">${icon}${label}<span class="entity-tab-delete" onclick="deleteEntityTab(${i}, event)" title="Delete crawl data">\u00d7</span></button>`;
     });
