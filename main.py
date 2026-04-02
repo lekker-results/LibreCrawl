@@ -2011,7 +2011,9 @@ def _domain_from_urls(urls):
     try:
         from urllib.parse import urlparse as _up
         raw = _up(urls[0].get('url', '')).netloc if urls else ''
-        return raw.lstrip('www.') if raw else ''
+        if raw.startswith('www.'):
+            raw = raw[4:]
+        return raw
     except Exception:
         return ''
 
@@ -2024,7 +2026,7 @@ def _get_user_google_places_key():
     from src.auth_db import get_user_settings
     settings = get_user_settings(user_id)
     if settings:
-        return settings.get('google_places_api_key', '')
+        return (settings.get('google_places_api_key') or '').strip()
     return ''
 
 
@@ -2262,13 +2264,9 @@ def api_social_connect_status(session_id):
     if login_sess.handle:
         resp['handle'] = login_sess.handle
     if login_sess.status == 'success':
-        user_id = session.get('user_id')
-        if user_id:
-            user_settings = get_user_settings(user_id) or {}
-            if 'social_cookies' not in user_settings:
-                user_settings['social_cookies'] = {}
-            user_settings['social_cookies'][login_sess.platform] = login_sess.cookies
-            save_user_settings(user_id, user_settings)
+        # Return cookies to the frontend so it can store them in localStorage.
+        # We no longer persist social cookies server-side.
+        resp['cookies'] = login_sess.cookies
         _login_sessions.pop(session_id, None)
     return jsonify(resp)
 
@@ -2283,40 +2281,29 @@ def api_social_connect_cancel(session_id):
     return jsonify({'ok': True})
 
 
+@app.route('/api/social/connect/<session_id>/grab-cookies', methods=['POST'])
+@login_required
+def api_social_grab_cookies(session_id):
+    """Manual trigger: user signals they are logged in; session extracts cookies immediately."""
+    from src.social_extractor import _login_sessions
+    login_sess = _login_sessions.get(session_id)
+    if not login_sess:
+        return jsonify({'error': 'session not found'}), 404
+    login_sess.grab_cookies()
+    return jsonify({'ok': True})
+
+
 @app.route('/api/social/disconnect/<platform>', methods=['POST'])
 @login_required
 def api_social_disconnect(platform):
-    """Remove stored session cookies for a platform. Bypasses settings tier filter."""
-    from src.auth_db import get_user_settings, save_user_settings
-    user_id = session.get('user_id')
-    if not user_id:
-        return jsonify({'error': 'not authenticated'}), 401
-    user_settings = get_user_settings(user_id) or {}
-    if 'social_cookies' in user_settings:
-        user_settings['social_cookies'].pop(platform, None)
-    save_user_settings(user_id, user_settings)
+    """No-op: social sessions are stored client-side (localStorage). Kept for compatibility."""
     return jsonify({'ok': True})
 
 
 @app.route('/api/social/credentials', methods=['POST'])
 @login_required
 def api_social_credentials():
-    """Save login credentials for a platform. Bypasses settings tier filter."""
-    from src.auth_db import get_user_settings, save_user_settings
-    user_id = session.get('user_id')
-    if not user_id:
-        return jsonify({'error': 'not authenticated'}), 401
-    body = request.get_json() or {}
-    platform = body.get('platform', '').lower()
-    username = body.get('username', '')
-    password = body.get('password', '')
-    if not platform:
-        return jsonify({'error': 'platform is required'}), 400
-    user_settings = get_user_settings(user_id) or {}
-    if 'social_credentials' not in user_settings:
-        user_settings['social_credentials'] = {}
-    user_settings['social_credentials'][platform] = {'username': username, 'password': password}
-    save_user_settings(user_id, user_settings)
+    """No-op: credentials are stored client-side (localStorage). Kept for compatibility."""
     return jsonify({'ok': True})
 
 
@@ -2342,8 +2329,8 @@ def api_social_fetch_profile():
         if entry['expires'] > now:
             return jsonify({'data': entry['data'], 'cached': True})
 
-    user_settings = get_user_settings(user_id) or {}
-    cookies_for_platform = user_settings.get('social_cookies', {}).get(platform)
+    # Cookies are stored client-side (localStorage) and passed in the request body.
+    cookies_for_platform = body.get('cookies') or None
     try:
         data = fetch_social_profile(url, platform, cookies=cookies_for_platform)
         _spc[cache_key] = {'data': data, 'expires': now + 1800}
@@ -3461,6 +3448,364 @@ def graceful_shutdown(signum, frame):
     print("Goodbye!")
     import sys
     sys.exit(0)
+
+
+# ── Phase 7: Pipeline & Portal API Routes ──────────────────────────
+
+@app.route('/api/pipeline', methods=['GET'])
+@api_auth_required
+def get_pipeline_overview():
+    """Return pipeline stage + portal completion summary for all clients."""
+    from src.db import get_db, get_cursor
+    try:
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            cursor.execute("""
+                SELECT
+                    c.id          AS client_id,
+                    c.name        AS client_name,
+                    ps.current_stage,
+                    ps.stage_name,
+                    ps.client_phase,
+                    ps.stage_entered_at,
+                    ps.last_followup_at,
+                    ps.next_action,
+                    COUNT(cc.id)                                           AS total_items,
+                    COUNT(cc.id) FILTER (WHERE cc.status IN ('verified','submitted')) AS completed_items,
+                    COUNT(cc.id) FILTER (
+                        WHERE cc.status IN ('pending','rejected')
+                          AND cc.due_date IS NOT NULL
+                          AND cc.due_date < CURRENT_DATE
+                    )                                                      AS overdue_items
+                FROM pipeline_state ps
+                JOIN clients c ON c.id = ps.client_id
+                LEFT JOIN client_checklists cc ON cc.client_id = c.id
+                GROUP BY c.id, c.name, ps.current_stage, ps.stage_name,
+                         ps.client_phase, ps.stage_entered_at,
+                         ps.last_followup_at, ps.next_action
+                ORDER BY ps.stage_entered_at DESC
+            """)
+            rows = cursor.fetchall()
+
+        clients = [
+            {
+                'client_id':    r['client_id'],
+                'client_name':  r['client_name'],
+                'current_stage': r['current_stage'],
+                'stage_name':   r['stage_name'],
+                'client_phase': r['client_phase'],
+                'stage_entered_at': r['stage_entered_at'].isoformat() if r['stage_entered_at'] else None,
+                'last_followup_at': r['last_followup_at'].isoformat() if r['last_followup_at'] else None,
+                'next_action':  r['next_action'],
+                'portal_completion': {
+                    'total':     r['total_items'],
+                    'completed': r['completed_items'],
+                    'overdue':   r['overdue_items'],
+                },
+            }
+            for r in rows
+        ]
+        return jsonify({'success': True, 'clients': clients})
+
+    except Exception as e:
+        print(f"Error in get_pipeline_overview: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/clients/<int:client_id>/pipeline', methods=['GET'])
+@api_auth_required
+def get_client_pipeline(client_id):
+    """Return full pipeline state + history for a single client."""
+    from src.db import get_db, get_cursor
+    try:
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+
+            cursor.execute("""
+                SELECT current_stage, stage_name, client_phase, client_phase_description,
+                       stage_entered_at, last_followup_at, next_action
+                FROM pipeline_state
+                WHERE client_id = %s
+            """, (client_id,))
+            state = cursor.fetchone()
+            if not state:
+                return jsonify({'success': False, 'error': 'No pipeline state found for this client'}), 404
+
+            cursor.execute("""
+                SELECT from_stage, to_stage, changed_by, notes, changed_at
+                FROM pipeline_history
+                WHERE client_id = %s
+                ORDER BY changed_at DESC
+                LIMIT 20
+            """, (client_id,))
+            history_rows = cursor.fetchall()
+
+        current = {
+            'stage':        state['current_stage'],
+            'stage_name':   state['stage_name'],
+            'client_phase': state['client_phase'],
+            'client_phase_description': state['client_phase_description'],
+            'stage_entered_at': state['stage_entered_at'].isoformat() if state['stage_entered_at'] else None,
+            'last_followup_at': state['last_followup_at'].isoformat() if state['last_followup_at'] else None,
+            'next_action':  state['next_action'],
+        }
+
+        history = [
+            {
+                'from_stage': r['from_stage'],
+                'to_stage':   r['to_stage'],
+                'changed_by': r['changed_by'],
+                'notes':      r['notes'],
+                'changed_at': r['changed_at'].isoformat() if r['changed_at'] else None,
+            }
+            for r in history_rows
+        ]
+
+        return jsonify({'success': True, 'current': current, 'history': history})
+
+    except Exception as e:
+        print(f"Error in get_client_pipeline: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/clients/<int:client_id>/pipeline', methods=['PUT'])
+@api_auth_required
+def update_client_pipeline(client_id):
+    """Advance or update a client's pipeline stage."""
+    from src.db import get_db, get_cursor
+    data = request.get_json() or {}
+    new_stage = data.get('stage')
+    notes = data.get('notes', '')
+
+    if new_stage is None:
+        return jsonify({'success': False, 'error': 'stage is required'}), 400
+
+    try:
+        new_stage = int(new_stage)
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'stage must be an integer'}), 400
+
+    PHASE_MAP = {
+        range(1, 10):  ('Proposal',        "We're learning about your business and preparing your proposal"),
+        range(10, 12): ('Setup',            "We're setting up your project"),
+        range(12, 13): ('Build',            "We're building your website"),
+        range(13, 18): ('Review & Launch',  "Your site is ready for review"),
+    }
+
+    def get_phase(stage):
+        for r, (phase, desc) in PHASE_MAP.items():
+            if stage in r:
+                return phase, desc
+        return ('Live', 'Your website is live')
+
+    phase, phase_desc = get_phase(new_stage)
+
+    STAGE_NAMES = {
+        1: 'Lead', 2: 'Discovery', 3: 'Research', 4: 'Proposal',
+        5: 'Asset Collection', 6: 'Theme Mockups', 7: 'Proposal Meeting',
+        8: 'Sent for Signing', 9: 'Awaiting Deposit', 10: 'Onboarding',
+        11: 'Keyword Research', 12: 'Building', 13: 'Waiting on Client',
+        14: 'Client Review', 15: 'Revisions', 16: 'Launch Ready',
+        17: 'Live', 18: 'Retainer',
+    }
+    stage_name = STAGE_NAMES.get(new_stage, f'Stage {new_stage}')
+
+    try:
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+
+            cursor.execute('SELECT id FROM clients WHERE id = %s', (client_id,))
+            if not cursor.fetchone():
+                return jsonify({'success': False, 'error': 'Client not found'}), 404
+
+            cursor.execute("""
+                INSERT INTO pipeline_state (
+                    client_id, current_stage, stage_name, client_phase,
+                    client_phase_description, stage_entered_at, previous_stage, notes
+                )
+                VALUES (%s, %s, %s, %s, %s, NOW(), NULL, %s)
+                ON CONFLICT (client_id) DO UPDATE SET
+                    previous_stage            = pipeline_state.current_stage,
+                    current_stage             = EXCLUDED.current_stage,
+                    stage_name                = EXCLUDED.stage_name,
+                    client_phase              = EXCLUDED.client_phase,
+                    client_phase_description  = EXCLUDED.client_phase_description,
+                    stage_entered_at          = NOW(),
+                    followup_count            = 0,
+                    notes                     = EXCLUDED.notes
+            """, (client_id, new_stage, stage_name, phase, phase_desc, notes or None))
+
+            cursor.execute("""
+                INSERT INTO pipeline_history (client_id, to_stage, changed_by, notes)
+                VALUES (%s, %s, 'librecrawl-ui', %s)
+            """, (client_id, new_stage, notes or None))
+
+        return jsonify({'success': True, 'stage': new_stage, 'stage_name': stage_name, 'phase': phase})
+
+    except Exception as e:
+        print(f"Error in update_client_pipeline: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/clients/<int:client_id>/portal', methods=['GET'])
+@api_auth_required
+def get_client_portal(client_id):
+    """Full portal status for a client: checklist, follow-up log, credential count."""
+    from src.db import get_db, get_cursor
+    from datetime import date
+    try:
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+
+            cursor.execute("""
+                SELECT portal_type, is_active, created_at
+                FROM client_portal_records
+                WHERE client_id = %s
+            """, (client_id,))
+            portal_row = cursor.fetchone()
+
+            cursor.execute("""
+                SELECT
+                    cc.id, cc.status, cc.priority, cc.due_date, cc.submitted_at,
+                    cc.rejection_reason,
+                    COALESCE(cc.custom_name, ri.name)        AS name,
+                    COALESCE(cc.custom_description, ri.description) AS description,
+                    ri.category, ri.item_type
+                FROM client_checklists cc
+                LEFT JOIN requirement_items ri ON ri.id = cc.requirement_item_id
+                WHERE cc.client_id = %s
+                ORDER BY
+                    CASE cc.priority WHEN 'critical' THEN 1 WHEN 'important' THEN 2 ELSE 3 END,
+                    cc.created_at
+            """, (client_id,))
+            items_rows = cursor.fetchall()
+
+            total     = len(items_rows)
+            completed = sum(1 for r in items_rows if r['status'] in ('verified', 'submitted'))
+            pending   = sum(1 for r in items_rows if r['status'] == 'pending')
+            rejected  = sum(1 for r in items_rows if r['status'] == 'rejected')
+            overdue   = sum(
+                1 for r in items_rows
+                if r['status'] in ('pending', 'rejected')
+                and r['due_date'] is not None
+                and r['due_date'] < date.today()
+            )
+
+            items = [
+                {
+                    'id':               r['id'],
+                    'name':             r['name'],
+                    'category':         r['category'],
+                    'item_type':        r['item_type'],
+                    'status':           r['status'],
+                    'priority':         r['priority'],
+                    'due_date':         r['due_date'].isoformat() if r['due_date'] else None,
+                    'submitted_at':     r['submitted_at'].isoformat() if r['submitted_at'] else None,
+                    'rejection_reason': r['rejection_reason'],
+                    'description':      r['description'],
+                }
+                for r in items_rows
+            ]
+
+            cursor.execute("""
+                SELECT event_type, sent_at, subject, status, channel
+                FROM followup_events
+                WHERE client_id = %s
+                ORDER BY sent_at DESC
+                LIMIT 10
+            """, (client_id,))
+            followup_rows = cursor.fetchall()
+            recent_followups = [
+                {
+                    'event_type': r['event_type'],
+                    'sent_at':    r['sent_at'].isoformat() if r['sent_at'] else None,
+                    'subject':    r['subject'],
+                    'status':     r['status'],
+                    'channel':    r['channel'],
+                }
+                for r in followup_rows
+            ]
+
+            cursor.execute("""
+                SELECT COUNT(*) AS cnt FROM client_credentials WHERE client_id = %s
+            """, (client_id,))
+            cred_row = cursor.fetchone()
+            credentials_submitted = cred_row['cnt'] if cred_row else 0
+
+        portal_info = {
+            'portal_type':    portal_row['portal_type'] if portal_row else None,
+            'is_active':      portal_row['is_active']   if portal_row else False,
+            'created_at':     portal_row['created_at'].isoformat() if portal_row and portal_row['created_at'] else None,
+            'checklist': {
+                'total':     total,
+                'completed': completed,
+                'pending':   pending,
+                'overdue':   overdue,
+                'rejected':  rejected,
+                'items':     items,
+            },
+            'recent_followups':      recent_followups,
+            'credentials_submitted': credentials_submitted,
+        }
+
+        return jsonify({'success': True, 'portal': portal_info})
+
+    except Exception as e:
+        print(f"Error in get_client_portal: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/clients/<int:client_id>/portal/verify/<int:item_id>', methods=['POST'])
+@api_auth_required
+def verify_checklist_item(client_id, item_id):
+    """Mark a checklist item as verified."""
+    from src.db import get_db, get_cursor
+    try:
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            cursor.execute("""
+                UPDATE client_checklists
+                SET status = 'verified', verified_at = NOW()
+                WHERE id = %s AND client_id = %s
+            """, (item_id, client_id))
+            if cursor.rowcount == 0:
+                return jsonify({'success': False, 'error': 'Item not found or does not belong to this client'}), 404
+
+        return jsonify({'success': True})
+
+    except Exception as e:
+        print(f"Error in verify_checklist_item: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/clients/<int:client_id>/portal/reject/<int:item_id>', methods=['POST'])
+@api_auth_required
+def reject_checklist_item(client_id, item_id):
+    """Reject a checklist item with a reason."""
+    from src.db import get_db, get_cursor
+    data = request.get_json() or {}
+    reason = data.get('reason', '').strip()
+
+    if not reason:
+        return jsonify({'success': False, 'error': 'reason is required'}), 400
+
+    try:
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            cursor.execute("""
+                UPDATE client_checklists
+                SET status = 'rejected', rejection_reason = %s, verified_at = NULL
+                WHERE id = %s AND client_id = %s
+            """, (reason, item_id, client_id))
+            if cursor.rowcount == 0:
+                return jsonify({'success': False, 'error': 'Item not found or does not belong to this client'}), 404
+
+        return jsonify({'success': True})
+
+    except Exception as e:
+        print(f"Error in reject_checklist_item: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 def main():
     import signal
