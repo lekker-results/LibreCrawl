@@ -113,8 +113,8 @@ html[data-theme="light"] {
   --details-modal-start: rgba(255, 255, 255, 0.98);
   --details-modal-end: rgba(248, 250, 252, 0.98);
   /* Borders — visible but not heavy */
-  --border-subtle: rgba(0, 0, 0, 0.06);
-  --border-standard: #cbd5e1;
+  --border-subtle: rgba(0, 0, 0, 0.12);
+  --border-standard: #b0bccb;
   --border-alt: #e2e8f0;
   --border-input: #94a3b8;
   --border-section: #e2e8f0;
@@ -227,6 +227,9 @@ body {
 .app-container.welcome-mode #welcomePage {
     display: flex;
 }
+.app-container.welcome-mode .client-search-wrapper {
+    display: none;
+}
 #welcomePage {
     display: none;
 }
@@ -241,7 +244,7 @@ body {
     overflow-y: auto;
 }
 .welcome-content {
-    max-width: 800px;
+    max-width: 1200px;
     width: 100%;
 }
 .welcome-hero {
@@ -265,45 +268,95 @@ body {
     margin-bottom: 16px;
     gap: 10px;
 }
+.welcome-search-bar-wrapper {
+    margin-bottom: 20px;
+}
+.welcome-search-input {
+    width: 100%;
+    padding: 10px 16px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-standard);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 14px;
+    outline: none;
+    box-sizing: border-box;
+}
+.welcome-search-input:focus {
+    border-color: var(--accent-1);
+}
+.welcome-search-input::placeholder {
+    color: var(--text-dim);
+}
 .welcome-clients-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 16px;
 }
 .welcome-client-card {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 16px 20px;
-    background: var(--bg-section);
-    border: 1px solid var(--border-subtle);
-    border-radius: 10px;
+    flex-direction: column;
+    gap: 12px;
+    padding: 20px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-standard);
+    border-radius: 12px;
     cursor: pointer;
-    transition: border-color 0.15s, background 0.15s;
+    transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    max-width: 400px;
 }
 .welcome-client-card:hover {
     border-color: var(--accent-1);
-    background: var(--bg-elevated);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+}
+.welcome-client-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.welcome-client-avatar {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent-1), #8b5cf6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    font-weight: 700;
+    color: #fff;
+    flex-shrink: 0;
 }
 .welcome-client-info {
     display: flex;
     flex-direction: column;
     gap: 2px;
+    min-width: 0;
 }
 .welcome-client-name {
     font-size: 15px;
     font-weight: 600;
     color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 .welcome-client-domain {
-    font-size: 13px;
+    font-size: 12px;
     color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
-.welcome-client-meta {
+.welcome-client-footer {
     display: flex;
-    gap: 16px;
+    justify-content: space-between;
     font-size: 12px;
     color: var(--text-dim);
+    padding-top: 8px;
+    border-top: 1px solid var(--border-alt);
 }
 .welcome-empty {
     text-align: center;
@@ -497,12 +550,19 @@ body {
     border-bottom-color: #818cf8;
 }
 .entity-tab .entity-tab-icon {
-    margin-right: 6px;
+    margin-right: 5px;
     font-size: 12px;
     opacity: 0.7;
 }
-.entity-tab.competitor .entity-tab-icon {
+.entity-tab-icon--comp {
+    font-size: 14px !important;
+    opacity: 1 !important;
     color: #f59e0b;
+}
+.entity-tab-icon--branch {
+    font-size: 10px !important;
+    opacity: 0.6 !important;
+    color: #60a5fa;
 }
 .entity-tab-delete {
     margin-left: 8px;
@@ -588,6 +648,40 @@ body {
 }
 .entity-tab-close:hover {
     color: var(--status-error);
+}
+
+/* Light theme: browser-style tabs — active tab rises from the bar as a white card */
+html[data-theme="light"] .entity-tab-bar {
+    background: var(--bg-section);
+    border-bottom: 1px solid var(--border-standard);
+}
+html[data-theme="light"] .entity-tab {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px 6px 0 0;
+    border-bottom: none;
+    margin: 0 1px;
+    color: var(--text-secondary);
+}
+html[data-theme="light"] .entity-tab:hover {
+    background: rgba(0,0,0,0.05);
+    border-color: var(--border-alt);
+    border-bottom-color: transparent;
+    color: var(--text-primary);
+}
+html[data-theme="light"] .entity-tab.active {
+    background: var(--bg-elevated);
+    border-color: var(--border-standard);
+    border-bottom: 1px solid var(--bg-elevated);
+    margin-bottom: -1px;
+    color: var(--text-primary);
+}
+
+.control-buttons-divider {
+    width: 1px;
+    background: var(--border-standard);
+    align-self: stretch;
+    margin: 0 4px;
 }
 
 /* Off-Page Full View */
@@ -1140,6 +1234,24 @@ body {
     color: var(--accent-4);
     border-left-color: var(--accent-2);
     background: var(--tab-active-bg);
+}
+.tab-btn-loading {
+    position: relative;
+}
+.tab-btn-loading::after {
+    content: '';
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    border-top-color: var(--accent-1);
+    animation: tab-spin 0.7s linear infinite;
+}
+@keyframes tab-spin {
+    to { transform: rotate(360deg); }
 }
 .tab-icon {
     display: flex;
@@ -2285,4 +2397,123 @@ html[data-theme="light"] .setting-group select {
     color: var(--text-dim);
     font-size: 13px;
     margin-top: 6px;
+}
+
+/* ============================================================
+   Phase 7 — Pipeline Badge & Portal Status Styles
+   ============================================================ */
+
+/* Pipeline phase badge — used on welcome cards and client header strip */
+.pipeline-phase-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+.pipeline-phase-badge[data-phase="Proposal"] {
+    background: #312e81;
+    color: #a5b4fc;
+    border: 1px solid #4f46e5;
+}
+.pipeline-phase-badge[data-phase="Setup"] {
+    background: #1e3a5f;
+    color: #93c5fd;
+    border: 1px solid #2563eb;
+}
+.pipeline-phase-badge[data-phase="Build"] {
+    background: #14532d;
+    color: #86efac;
+    border: 1px solid #16a34a;
+}
+.pipeline-phase-badge[data-phase="Review & Launch"] {
+    background: #451a03;
+    color: #fcd34d;
+    border: 1px solid #d97706;
+}
+.pipeline-phase-badge[data-phase="Live"] {
+    background: #1a2e05;
+    color: #a3e635;
+    border: 1px solid #65a30d;
+}
+
+/* Light theme overrides for phase badges */
+html[data-theme="light"] .pipeline-phase-badge[data-phase="Proposal"] {
+    background: #e0e7ff;
+    color: #3730a3;
+    border-color: #818cf8;
+}
+html[data-theme="light"] .pipeline-phase-badge[data-phase="Setup"] {
+    background: #dbeafe;
+    color: #1d4ed8;
+    border-color: #60a5fa;
+}
+html[data-theme="light"] .pipeline-phase-badge[data-phase="Build"] {
+    background: #dcfce7;
+    color: #15803d;
+    border-color: #4ade80;
+}
+html[data-theme="light"] .pipeline-phase-badge[data-phase="Review & Launch"] {
+    background: #fef3c7;
+    color: #92400e;
+    border-color: #fbbf24;
+}
+html[data-theme="light"] .pipeline-phase-badge[data-phase="Live"] {
+    background: #ecfccb;
+    color: #3f6212;
+    border-color: #84cc16;
+}
+
+/* Portal completion indicator on welcome cards */
+.portal-completion-indicator {
+    display: inline-block;
+    font-size: 11px;
+    color: var(--text-dim);
+    background: var(--surface-1);
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border-alt);
+}
+
+/* Overdue badge */
+.portal-overdue-badge {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--status-error);
+    background: var(--status-error-bg);
+    padding: 2px 6px;
+    border-radius: 999px;
+}
+
+/* Days-in-stage micro indicator */
+.pipeline-days-indicator {
+    font-size: 10px;
+    color: var(--text-dim);
+}
+
+/* Client header pipeline status strip */
+.client-pipeline-status {
+    padding: 6px 16px;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+    background: var(--bg-section);
+    border-bottom: 1px solid var(--border-alt);
+    font-size: 12px;
+}
+.client-pipeline-days {
+    color: var(--text-dim);
+    font-size: 12px;
+}
+.client-pipeline-portal {
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+/* Welcome pipeline row inside cards */
+.welcome-pipeline-row {
+    padding: 4px 0;
 }
