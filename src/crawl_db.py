@@ -382,6 +382,12 @@ def init_crawl_tables():
             'ALTER TABLE crawl_offpage_results ADD COLUMN client_id INTEGER',
             'ALTER TABLE crawls ADD COLUMN entity_id INTEGER REFERENCES client_entities(id) ON DELETE SET NULL',
             'ALTER TABLE crawl_offpage_results ADD COLUMN entity_id INTEGER',
+            # Phase 7: portal integration columns on clients
+            'ALTER TABLE clients ADD COLUMN portal_active BOOLEAN DEFAULT FALSE',
+            'ALTER TABLE clients ADD COLUMN portal_token TEXT',
+            'ALTER TABLE clients ADD COLUMN portal_type TEXT',
+            'ALTER TABLE clients ADD COLUMN pipeline_stage INTEGER DEFAULT 1',
+            'ALTER TABLE clients ADD COLUMN pipeline_stage_name TEXT',
         ]:
             try:
                 if DB_TYPE == 'postgres':
