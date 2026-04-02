@@ -52,6 +52,7 @@ class PluginLoader {
             'social-profiles.js',
             'seo-audit.js',
             // 'content-quality.js',
+            'portal-status.js',
         ];
 
         // Filter out disabled plugins (starting with _)
