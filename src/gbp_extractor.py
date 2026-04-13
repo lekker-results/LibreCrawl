@@ -671,6 +671,30 @@ def build_gbp_report_from_client_info(business_name, location=None, phone=None,
     }
 
 
+def scrape_gbp_for_competitor(business_name, location=None, phone=None,
+                               domain=None, api_key=None, *,
+                               client_id=None, competitor_id=None):
+    """Fetch a GBP report for a single competitor via Places API.
+
+    Thin wrapper around build_gbp_report_from_client_info() that tags the
+    result with optional client_id and competitor_id for correlation by the
+    caller. Used by the /api/clients/<id>/gbp-batch endpoint and by the
+    /review-mining agency skill (Track 1).
+    """
+    report = build_gbp_report_from_client_info(
+        business_name=business_name,
+        location=location,
+        phone=phone,
+        domain=domain,
+        api_key=api_key,
+    )
+    if client_id is not None:
+        report['client_id'] = client_id
+    if competitor_id is not None:
+        report['competitor_id'] = competitor_id
+    return report
+
+
 def _parse_location_string(location):
     """Parse a location string like 'Chicago, IL' into an address dict."""
     parts = [p.strip() for p in location.split(',') if p.strip()]
