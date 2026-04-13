@@ -362,18 +362,23 @@ def match_place_to_branch(places, domain, branch):
 
     Scoring system:
         +50 if websiteUri domain matches crawled domain
-        +30 if phone number matches (digits only)
+        +30 if phone number matches (country-code-aware)
         +25 if street address has significant overlap
         +20 if city/locality matches
         +15 if business name is contained in place name (or vice versa)
         +10 if business name exact-matches
+
+    Each scored place also carries a `match_tier` classification:
+        "high"   → website OR phone match — structurally unique signal
+        "medium" → street match, or city+name contains — plausible but needs review
+        "low"    → city + partial name only, or weaker — do not trust
 
     Returns:
         list of places sorted by match_confidence (descending), best match first
     """
     scored = []
     branch_name = (branch.get('name') or '').lower().strip()
-    branch_phone = _normalize_phone(branch.get('telephone', ''))
+    branch_phone = branch.get('telephone', '') or ''
     branch_city = (branch.get('address', {}).get('city') or '').lower().strip()
     branch_street = (branch.get('address', {}).get('street') or '').lower().strip()
 
@@ -390,15 +395,13 @@ def match_place_to_branch(places, domain, branch):
                 score += 50
                 match_reasons.append('website match')
 
-        # Phone match (+30)
-        place_phone = _normalize_phone(
-            place.get('nationalPhoneNumber', '') or place.get('internationalPhoneNumber', '')
+        # Phone match (+30) — country-code-aware subscriber comparison
+        place_phone = (
+            place.get('nationalPhoneNumber', '') or place.get('internationalPhoneNumber', '') or ''
         )
-        if place_phone and branch_phone:
-            # Compare last 10 digits to handle country code variations
-            if place_phone[-10:] == branch_phone[-10:] and len(branch_phone) >= 7:
-                score += 30
-                match_reasons.append('phone match')
+        if _phones_match(place_phone, branch_phone):
+            score += 30
+            match_reasons.append('phone match')
 
         # Street address match (+25)
         place_address = (place.get('formattedAddress') or '').lower()
@@ -438,6 +441,7 @@ def match_place_to_branch(places, domain, branch):
         place_copy = dict(place)
         place_copy['match_confidence'] = score
         place_copy['match_reasons'] = match_reasons
+        place_copy['match_tier'] = _classify_match_tier(score, match_reasons)
         scored.append(place_copy)
 
     scored.sort(key=lambda p: p['match_confidence'], reverse=True)
@@ -447,6 +451,59 @@ def match_place_to_branch(places, domain, branch):
 def _normalize_phone(phone):
     """Strip non-digit chars for comparison."""
     return re.sub(r'\D', '', phone or '')
+
+
+def _phone_subscriber(phone):
+    """Reduce a phone number to its national subscriber digits for comparison.
+
+    Strips formatting, then removes either the domestic trunk prefix (leading
+    '0') or the country code, so that international and domestic formats of the
+    same number compare equal. Compares the last 9 digits — covers SA, UK,
+    AU, most of EU. Handles the SA case where +27 vs 0 shifts the prefix
+    (last-10 comparison was failing before).
+    """
+    digits = _normalize_phone(phone)
+    if not digits:
+        return ''
+    # Drop a leading '0' (domestic trunk prefix in SA, UK, AU, DE, FR, etc.)
+    if digits.startswith('0'):
+        digits = digits[1:]
+    # Use last 9 digits — the national subscriber number length for most
+    # countries (SA: 9, UK: 10 but last-9 still unique, US: 10 same).
+    return digits[-9:] if len(digits) >= 9 else digits
+
+
+def _phones_match(a, b):
+    """True when two phone strings refer to the same subscriber number."""
+    sa = _phone_subscriber(a)
+    sb = _phone_subscriber(b)
+    return bool(sa) and bool(sb) and len(sa) >= 7 and sa == sb
+
+
+# Tier thresholds live here so tests and callers can reference them.
+MATCH_TIER_HIGH_REASONS = {'website match', 'phone match'}
+MATCH_TIER_MEDIUM_REASONS = {'street match'}
+
+
+def _classify_match_tier(score, reasons):
+    """Classify a place's match confidence into high/medium/low.
+
+    Rule-of-thumb (prefers structural signals over numeric thresholds):
+    - 'high'   if the match includes a website-domain or phone-subscriber
+                match — these are unique identifiers.
+    - 'medium' if the match includes a street-address overlap.
+    - 'low'    otherwise, even if score is high from weaker signals
+                (city + name alone produces false positives in dense markets).
+
+    Callers use this tier to decide whether to trust the match enough to
+    persist a place_id or attribute reviews to the target business.
+    """
+    reason_set = set(reasons or [])
+    if reason_set & MATCH_TIER_HIGH_REASONS:
+        return 'high'
+    if reason_set & MATCH_TIER_MEDIUM_REASONS:
+        return 'medium'
+    return 'low'
 
 
 def build_gbp_report(urls, api_key):
@@ -659,16 +716,65 @@ def build_gbp_report_from_client_info(business_name, location=None, phone=None,
             break
 
     if best_result:
+        top = best_result[0]
+        tier = top.get('match_tier') or _classify_match_tier(
+            top.get('match_confidence', 0), top.get('match_reasons', [])
+        )
         branch_result['all_candidates'] = best_result
-        branch_result['gbp'] = best_result[0]
-        branch_result['match_confidence'] = best_result[0].get('match_confidence', 0)
+        branch_result['match_confidence'] = top.get('match_confidence', 0)
+        branch_result['match_tier'] = tier
+        branch_result['match_reasons'] = top.get('match_reasons', [])
+        if tier == 'low':
+            # Refuse the false-positive: candidates exist but none have a
+            # unique identifier (website/phone/street). Do not mint a
+            # place_id the caller will treat as authoritative.
+            branch_result['gbp'] = None
+            branch_result['reason'] = (
+                'no confident GBP match — best candidate matched on weak '
+                'signals only (e.g. city + partial name). Likely the '
+                'business has no Google Business Profile, or its profile '
+                'is not indexed for this query.'
+            )
+        else:
+            branch_result['gbp'] = top
+    else:
+        branch_result['match_tier'] = 'none'
+        branch_result['match_reasons'] = []
+        branch_result['reason'] = 'no candidates returned by Places API'
 
     return {
         'domain': domain or '',
         'brand_name': business_name,
         'branches': [branch_result],
+        'match_tier': branch_result.get('match_tier', 'none'),
+        'match_confidence': branch_result.get('match_confidence', 0),
+        'match_reasons': branch_result.get('match_reasons', []),
         'analyzed_at': datetime.now().isoformat(),
     }
+
+
+def scrape_gbp_for_competitor(business_name, location=None, phone=None,
+                               domain=None, api_key=None, *,
+                               client_id=None, competitor_id=None):
+    """Fetch a GBP report for a single competitor via Places API.
+
+    Thin wrapper around build_gbp_report_from_client_info() that tags the
+    result with optional client_id and competitor_id for correlation by the
+    caller. Used by the /api/clients/<id>/gbp-batch endpoint and by the
+    /review-mining agency skill (Track 1).
+    """
+    report = build_gbp_report_from_client_info(
+        business_name=business_name,
+        location=location,
+        phone=phone,
+        domain=domain,
+        api_key=api_key,
+    )
+    if client_id is not None:
+        report['client_id'] = client_id
+    if competitor_id is not None:
+        report['competitor_id'] = competitor_id
+    return report
 
 
 def _parse_location_string(location):

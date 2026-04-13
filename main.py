@@ -1633,6 +1633,91 @@ def client_gbp(client_id):
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)})
 
+@app.route('/api/clients/<int:client_id>/gbp-batch', methods=['POST'])
+@api_auth_required
+def client_gbp_batch(client_id):
+    """Batch GBP lookup for multiple competitors.
+
+    Request body:
+        {
+          "businesses": [
+            {
+              "business_name": "...",
+              "location": "Sandton, Gauteng",   # optional
+              "phone": "+27 11 ...",             # optional
+              "domain": "example.co.za",         # optional
+              "competitor_id": 123               # optional — portal
+                                                 # client_competitors.id, echoed back
+            },
+            ...
+          ]
+        }
+
+    Response:
+        {
+          "success": true,
+          "results": [
+            {"competitor_id": 123, "domain": "...", "gbp": { ...full report... }},
+            ...
+          ]
+        }
+
+    Resolution order for the Places API key matches the single-client
+    endpoint: session settings → GOOGLE_PLACES_API_KEY env var.
+    """
+    try:
+        user_id = _get_api_user_id()
+        from src.crawl_db import get_client
+
+        client = get_client(client_id, user_id)
+        if not client:
+            return jsonify({'success': False, 'error': 'Client not found'}), 404
+
+        data = request.get_json() or {}
+        businesses = data.get('businesses') or []
+        if not isinstance(businesses, list) or not businesses:
+            return jsonify({'success': False, 'error': 'businesses array is required'}), 400
+
+        settings_manager = get_session_settings()
+        api_key = settings_manager.get_setting('google_places_api_key') or os.environ.get('GOOGLE_PLACES_API_KEY')
+        if not api_key:
+            return jsonify({'success': False, 'error': 'Google Places API key not configured. Set it in Settings > Requests tab.'}), 400
+
+        from src.gbp_extractor import scrape_gbp_for_competitor
+
+        results = []
+        for biz in businesses:
+            business_name = (biz.get('business_name') or '').strip()
+            if not business_name:
+                results.append({
+                    'competitor_id': biz.get('competitor_id'),
+                    'domain': (biz.get('domain') or '').strip() or None,
+                    'gbp': {'error': 'business_name is required', 'branches': []},
+                })
+                continue
+
+            report = scrape_gbp_for_competitor(
+                business_name=business_name,
+                location=(biz.get('location') or '').strip() or None,
+                phone=(biz.get('phone') or '').strip() or None,
+                domain=(biz.get('domain') or '').strip() or None,
+                api_key=api_key,
+                client_id=client_id,
+                competitor_id=biz.get('competitor_id'),
+            )
+            results.append({
+                'competitor_id': biz.get('competitor_id'),
+                'domain': (biz.get('domain') or '').strip() or None,
+                'gbp': report,
+            })
+
+        return jsonify({'success': True, 'results': results})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)})
+
+
 @app.route('/api/clients/<int:client_id>/social', methods=['GET', 'POST'])
 @api_auth_required
 def client_social(client_id):
