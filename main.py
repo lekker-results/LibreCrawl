@@ -54,14 +54,24 @@ def generate_random_password(length=16):
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
 def auto_login_local_mode():
-    """Auto-login for local mode - creates or logs into 'local' admin account"""
+    """Auto-login for local mode.
+
+    Prefers an existing 'system' admin user (the convention used by portal
+    integrations and other shared deployments) so all clients created in
+    LOCAL_MODE share ownership with portal-created clients. Falls back to
+    'local' if 'system' is missing, and creates 'local' as a last resort.
+    """
     from src.db import get_db, get_cursor, ph, returning_id, get_last_id
     try:
         with get_db() as conn:
             cursor = get_cursor(conn)
 
-            # Check if 'local' user exists
-            cursor.execute(f'SELECT id, username, tier FROM users WHERE username = {ph()}', ('local',))
+            # Prefer 'system' (shared convention), fall back to 'local'
+            cursor.execute(
+                f"SELECT id, username, tier FROM users WHERE username IN ({ph()}, {ph()}) "
+                f"ORDER BY CASE username WHEN 'system' THEN 0 ELSE 1 END LIMIT 1",
+                ('system', 'local'),
+            )
             user = cursor.fetchone()
 
             if user:
@@ -70,9 +80,9 @@ def auto_login_local_mode():
                 session['username'] = user['username']
                 session['tier'] = 'admin'
                 session.permanent = True
-                print(f"Auto-logged in as existing 'local' user (ID: {user['id']})")
+                print(f"Auto-logged in as existing '{user['username']}' user (ID: {user['id']})")
             else:
-                # Create new local user with random password
+                # Neither 'system' nor 'local' exists — create 'local' as a fresh-install fallback
                 random_password = generate_random_password()
                 from src.auth_db import hash_password
                 password_hash = hash_password(random_password)
@@ -181,6 +191,12 @@ def api_auth_required(f):
     def decorated_function(*args, **kwargs):
         # Check X-Local-Auth header in local mode
         if LOCAL_MODE and request.headers.get('X-Local-Auth', '').lower() == 'true':
+            # Ensure the 'local' user exists and the session is populated.
+            # Without this, _get_api_user_id() falls through to the read-only
+            # _get_local_user_id(), which returns None on a fresh DB and causes
+            # NOT NULL violations on user_id when endpoints write rows.
+            if 'user_id' not in session:
+                auto_login_local_mode()
             return f(*args, **kwargs)
 
         # Check Bearer token
