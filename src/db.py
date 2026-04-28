@@ -4,6 +4,7 @@ Supports PostgreSQL (via DATABASE_URL) with SQLite fallback.
 """
 import os
 import sqlite3
+import sys
 from contextlib import contextmanager
 
 DATABASE_URL = os.getenv('DATABASE_URL', '')
@@ -23,24 +24,83 @@ if DATABASE_URL and DATABASE_URL.startswith('postgresql'):
             _pool = psycopg2.pool.ThreadedConnectionPool(
                 minconn=2,
                 maxconn=10,
-                dsn=DATABASE_URL
+                dsn=DATABASE_URL,
+                # Keepalives keep idle connections alive through Supabase's
+                # pooler and intermediate NATs. Without these, connections
+                # silently die and the pool hands out broken handles.
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=3,
             )
         return _pool
 
+    def _connection_is_healthy(conn):
+        """Ping the connection with a cheap query. Returns True if usable.
+
+        Leaves the connection in a clean, idle, non-transaction state so the
+        caller can freely set autocommit and start a fresh transaction.
+        """
+        if conn.closed:
+            return False
+        try:
+            # Reset any aborted transaction state before the ping.
+            conn.rollback()
+            with conn.cursor() as cur:
+                cur.execute('SELECT 1')
+                cur.fetchone()
+            # Close the implicit transaction started by SELECT so the caller
+            # can set autocommit without "cannot be used inside a transaction".
+            conn.rollback()
+            return True
+        except (psycopg2.InterfaceError, psycopg2.OperationalError, psycopg2.DatabaseError):
+            return False
+
     @contextmanager
     def get_db():
-        """Context manager for PostgreSQL connections using connection pool."""
+        """Context manager for PostgreSQL connections using connection pool.
+
+        Validates the connection before yielding so that stale / idle-killed
+        pool entries (common with Supabase's transaction pooler dropping
+        idle connections) are transparently recycled instead of handing
+        out broken handles that fail silently.
+        """
         pool = _get_pool()
         conn = pool.getconn()
+        # Up to two attempts: if the first conn is dead, discard and retry once.
+        if not _connection_is_healthy(conn):
+            print('[db] stale connection from pool — recycling', flush=True, file=sys.stderr)
+            try:
+                pool.putconn(conn, close=True)
+            except Exception:
+                pass
+            conn = pool.getconn()
+            if not _connection_is_healthy(conn):
+                # Second dead conn — surface it rather than silently failing.
+                try:
+                    pool.putconn(conn, close=True)
+                except Exception:
+                    pass
+                raise psycopg2.OperationalError(
+                    'Unable to obtain a healthy database connection from the pool'
+                )
         conn.autocommit = False
+        close_on_release = False
         try:
             yield conn
             conn.commit()
         except Exception as e:
-            conn.rollback()
+            try:
+                conn.rollback()
+            except Exception:
+                # Rollback itself failed — connection is toast, close on release.
+                close_on_release = True
             raise e
         finally:
-            pool.putconn(conn)
+            try:
+                pool.putconn(conn, close=close_on_release)
+            except Exception:
+                pass
 
     def get_cursor(conn):
         """Get a cursor that returns dict-like rows."""

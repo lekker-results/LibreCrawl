@@ -1243,10 +1243,13 @@ def create_client(user_id, name, domain=None, business_name=None,
                 VALUES ({ph(8)}){returning_id()}
             ''', (user_id, name, domain, business_name, location, phone, address, notes))
             client_id = get_last_id(cursor)
-            print(f"Created client: id={client_id}, name={name}")
+            print(f"Created client: id={client_id}, name={name}", flush=True)
             return client_id
     except Exception as e:
-        print(f"Error creating client: {e}")
+        # Flush + stderr so failures surface in logs even when stdout is block-buffered.
+        import sys, traceback
+        print(f"Error creating client: {type(e).__name__}: {e}", flush=True, file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         return None
 
 
@@ -1267,7 +1270,9 @@ def get_user_clients(user_id):
             ''', (user_id,))
             return [dict(row) for row in cursor.fetchall()]
     except Exception as e:
-        print(f"Error fetching clients: {e}")
+        import sys, traceback
+        print(f"Error fetching clients: {type(e).__name__}: {e}", flush=True, file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         return []
 
 
