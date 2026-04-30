@@ -414,6 +414,10 @@ def create_crawl(user_id, session_id, base_url, base_domain, config_snapshot,
     try:
         with get_db() as conn:
             cursor = get_cursor(conn)
+
+            delete_crawls_for_domain(base_domain, crawl_type=crawl_type,
+                                     client_id=client_id, entity_id=entity_id)
+
             cursor.execute(f'''
                 INSERT INTO crawls (user_id, session_id, base_url, base_domain, config_snapshot, status, client_id, crawl_type, entity_id)
                 VALUES ({ph(9)}){returning_id()}
@@ -829,6 +833,45 @@ def delete_crawl(crawl_id):
         print(f"Error deleting crawl: {e}")
         return False
 
+def delete_crawls_for_domain(base_domain, crawl_type='standalone', client_id=None, entity_id=None):
+    """Delete all non-running crawls for a domain before starting a fresh one.
+
+    Scoped by entity_id when available (most specific), then by
+    (base_domain, client_id, crawl_type), falling back to standalone scope.
+    CASCADE propagates to crawled_urls, crawl_links, crawl_issues, etc.
+    Returns the number of crawl records deleted.
+    """
+    try:
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            if entity_id is not None:
+                # Entity scope doesn't require base_domain — clean up regardless.
+                cursor.execute(
+                    f"DELETE FROM crawls WHERE entity_id = {ph()} AND status != {ph()}",
+                    (entity_id, 'running')
+                )
+            elif base_domain:
+                if client_id is not None:
+                    cursor.execute(
+                        f"DELETE FROM crawls WHERE base_domain = {ph()} AND client_id = {ph()}"
+                        f" AND crawl_type = {ph()} AND status != {ph()}",
+                        (base_domain, client_id, crawl_type, 'running')
+                    )
+                else:
+                    cursor.execute(
+                        f"DELETE FROM crawls WHERE base_domain = {ph()} AND client_id IS NULL"
+                        f" AND crawl_type = {ph()} AND status != {ph()}",
+                        (base_domain, crawl_type, 'running')
+                    )
+            deleted = cursor.rowcount
+            if deleted > 0:
+                print(f"Pre-crawl cleanup: removed {deleted} old crawl(s) for {base_domain}"
+                      f" (type={crawl_type}, client_id={client_id}, entity_id={entity_id})")
+            return deleted
+    except Exception as e:
+        print(f"Error cleaning up old crawls for domain {base_domain}: {e}")
+        return 0
+
 def get_crashed_crawls():
     """Find crawls that were running when server crashed"""
     try:
@@ -1087,7 +1130,7 @@ def save_audit_result(crawl_id, domain, client_name, business_context, audit_dat
                 VALUES ({ph(2)})
             ''', (audit_id, json.dumps({})))
 
-            print(f"Saved audit result for crawl {crawl_id} (audit_id={audit_id}, version={next_version})")
+            print(f"Saved audit result for crawl {crawl_id} (audit_id={audit_id}, version=1)")
             return audit_id
 
     except Exception as e:
