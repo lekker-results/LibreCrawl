@@ -4,6 +4,24 @@ import json
 from urllib.parse import urljoin, urlparse
 
 
+_WS_RE = re.compile(r'\s+')
+
+
+def _safe_text(tag):
+    """Extract text from a BeautifulSoup tag with safe inline-element spacing.
+
+    BeautifulSoup's default get_text() concatenates text from nested inline elements
+    (e.g. <br>, <span>, <a>) without inserting a separator, producing artefacts like
+    "<h1>Services<br>in SA</h1>" -> "Servicesin SA". Downstream consumers (SEO audits,
+    AI tools, keyword extractors) read this flattened string and report it as a typo.
+
+    Pass separator=' ', then collapse runs of whitespace to a single space and strip.
+    """
+    if tag is None:
+        return ''
+    return _WS_RE.sub(' ', tag.get_text(separator=' ')).strip()
+
+
 class SEOExtractor:
     """Extracts SEO-related data from HTML content"""
 
@@ -12,7 +30,7 @@ class SEOExtractor:
         """Extract basic SEO data (title, headings, meta description, etc.)"""
         # Extract title
         title_tag = soup.find('title')
-        result['title'] = title_tag.get_text().strip() if title_tag else ''
+        result['title'] = _safe_text(title_tag)
 
         # Extract meta description
         meta_desc = soup.find('meta', attrs={'name': 'description'})
@@ -20,13 +38,13 @@ class SEOExtractor:
 
         # Extract headings
         h1_tag = soup.find('h1')
-        result['h1'] = h1_tag.get_text().strip() if h1_tag else ''
+        result['h1'] = _safe_text(h1_tag)
 
         h2_tags = soup.find_all('h2')
-        result['h2'] = [h2.get_text().strip() for h2 in h2_tags[:10]]
+        result['h2'] = [_safe_text(h2) for h2 in h2_tags[:10]]
 
         h3_tags = soup.find_all('h3')
-        result['h3'] = [h3.get_text().strip() for h3 in h3_tags[:10]]
+        result['h3'] = [_safe_text(h3) for h3 in h3_tags[:10]]
 
         # Count words
         text_content = soup.get_text()
